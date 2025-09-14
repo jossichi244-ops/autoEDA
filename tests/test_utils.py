@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from app.main import (
+from main import (
     convert_numpy_types,
     infer_schema_from_df,
     analyze_column,

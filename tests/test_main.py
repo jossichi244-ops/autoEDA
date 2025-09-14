@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+from main import app
 from io import BytesIO
 
 client = TestClient(app)
