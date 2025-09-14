@@ -1,0 +1,12 @@
+version: "3.8"
+services:
+  eda-backend:
+    build: .
+    container_name: eda-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./reports:/app/reports
+    environment:
+      - PYTHONUNBUFFERED=1
