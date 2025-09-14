@@ -1,28 +1,67 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
+# Caches
+*.cache
+.cache/
+pip-cache/
 
-# testing
-/coverage
-
-# production
-/build
-
-# misc
-.DS_Store
+# Environments
+.env
 .env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*.local
+.venv/
+venv/
+ENV/
+env/
+ENV.BAK/
+venv.bak/
 
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-__pycache__
+# Testing
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.coverage.xml
+*.cover
+.hypothesis/
+reports/
 
-reports
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+.DS_Store
 
-uploads
+# Logs
+logs
+*.log
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Deployment
+docker-compose.override.yml
+
+
+uploads/
+*.tmp
+*.temp
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Local database
+*.sqlite
+*.db
+
+# OS
+Thumbs.db

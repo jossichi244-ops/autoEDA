@@ -76,19 +76,19 @@ Upload file dữ liệu và nhận lại:
 
 ## 🔍 Một số tính năng nổi bật
 
-- **🧹 Làm sạch dữ liệu** : chuẩn hóa tên cột, xử lý missing values, expand multi-select.
-- **📈 Thống kê mô tả** : mean, median, skewness, kurtosis, outlier counts.
-- **🧩 Mối quan hệ biến** :
+- **Làm sạch dữ liệu** : chuẩn hóa tên cột, xử lý missing values, expand multi-select.
+- **Thống kê mô tả** : mean, median, skewness, kurtosis, outlier counts.
+- **Mối quan hệ biến** :
 - Correlation heatmap.
 - ANOVA / Chi-square.
 - Boxplot & barplot categorical-numeric.
-- **🤖 Clustering & Anomaly Detection** :
+- **Clustering & Anomaly Detection** :
 - KMeans + Silhouette Score.
 - Isolation Forest cho outlier flags.
-- **📊 Phân tích chuỗi thời gian** :
+- **Phân tích chuỗi thời gian** :
 - Trend, seasonality, residuals.
 - Outlier detection theo rolling z-score.
-- **📑 Gợi ý xử lý** : cột hằng số → drop, nhiều missing → impute/drop, high-cardinality → embedding…
+- **Gợi ý xử lý** : cột hằng số → drop, nhiều missing → impute/drop, high-cardinality → embedding…
 
 ---
 
@@ -101,7 +101,7 @@ Upload file dữ liệu và nhận lại:
 
 ---
 
-## 📌 Ghi chú từ kinh nghiệm 40 năm
+## 📌 Ghi chú từ kinh nghiệm của tôi
 
 - **Không có dữ liệu nào hoàn hảo.** Quan trọng là biết được dữ liệu _thiếu cái gì_ và _có thể tin tưởng điều gì_ .
 - **EDA không thay thế domain knowledge.** Công cụ này chỉ gợi ý, quyết định cuối cùng phải dựa trên bối cảnh kinh doanh.

@@ -20,6 +20,11 @@ from sklearn.metrics import silhouette_score
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.tsa.seasonal import seasonal_decompose
 from sklearn.ensemble import IsolationForest, RandomForestClassifier, RandomForestRegressor
+import logging
+from typing import Optional
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -134,7 +139,7 @@ def convert_numpy_types(obj):
         return {key: convert_numpy_types(value) for key, value in obj.items()}
     elif isinstance(obj, list):
         return [convert_numpy_types(item) for item in obj]
-    elif pd.isna(obj):  # Handles pd.NA, np.nan, None
+    elif pd.isna(obj): 
         return None
     return obj
 
@@ -343,7 +348,7 @@ def clean_column_name(name: str) -> str:
 
 def clean_dataset(df: pd.DataFrame, important_cols: list[str] = None, multi_select_cols: list[str] = None) -> dict:
     important_cols = important_cols or []
-    multi_select_cols = multi_select_cols or []   # ✅ chỉ định cột nào cần expand
+    multi_select_cols = multi_select_cols or []   
 
     before_shape = df.shape
     before_missing = df.isnull().sum().to_dict()
@@ -404,7 +409,6 @@ def descriptive_statistics(df: pd.DataFrame, max_categories: int = 10) -> dict:
         "remarks": []
     }
 
-    # 📊 Numeric columns
     num_cols = df.select_dtypes(include=[np.number]).columns
     for col in num_cols:
         series = df[col].dropna()
@@ -499,7 +503,7 @@ def generate_visualizations(df: pd.DataFrame, max_categories: int = 15) -> dict:
                 "y_label": "Frequency (count)",
                 "description": f"Histogram of {col}"
             },
-            "kde": series.tolist()[:5000],  # gửi sample để frontend plot KDE
+            "kde": series.tolist()[:5000],  
             "boxplot": {
                 "q1": float(series.quantile(0.25)),
                 "median": float(series.median()),
@@ -548,11 +552,11 @@ def generate_relationships(df: pd.DataFrame, max_categories: int = 15, sample_si
     """
 
     result = {
-        "categorical_vs_categorical": {},   # heatmap data
-        "numeric_vs_numeric": {},           # correlation + scatter
-        "mixed": {},                        # categorical vs numeric (bar/box)
+        "categorical_vs_categorical": {},   
+        "numeric_vs_numeric": {},           
+        "mixed": {},                        
         "interactive": {},
-        # "schema": df.columns.tolist()                 # sunburst, sankey, parallel
+        # "schema": df.columns.tolist()     
     }
 
     # --- Identify variable types ---
@@ -693,15 +697,25 @@ def safe_float(x):
     
 def analyze_significance(df, max_categories=50):
     results = {"chi2": {}, "anova": {}}
-    cat_cols = df.select_dtypes(include=["object","category"]).columns
+    cat_cols = df.select_dtypes(include=["object", "category"]).columns
     num_cols = df.select_dtypes(include=[np.number]).columns
 
-    # Chi-squared + Cramer's V
+    # --- Chi-squared + Cramér’s V ---
     for i, c1 in enumerate(cat_cols):
-        if df[c1].nunique() > max_categories: continue
+        if df[c1].nunique() > max_categories:
+            continue
         for c2 in cat_cols[i+1:]:
-            if df[c2].nunique() > max_categories: continue
+            if df[c2].nunique() > max_categories:
+                continue
             table = pd.crosstab(df[c1], df[c2])
+            if table.size == 0:
+                results["chi2"][f"{c1}__vs__{c2}"] = {
+                    "chi2": None,
+                    "p_value": None,
+                    "cramers_v": None,
+                    "note": "No data"
+                }
+                continue
             chi2, p, _, _ = chi2_contingency(table)
             cv = cramers_v(table)
             results["chi2"][f"{c1}__vs__{c2}"] = {
@@ -710,21 +724,30 @@ def analyze_significance(df, max_categories=50):
                 "cramers_v": safe_float(cv),
             }
 
-    # ANOVA + Eta²
+    # --- ANOVA + η² ---
     for cat in cat_cols:
-        if df[cat].nunique() > max_categories: continue
+        if df[cat].nunique() > max_categories:
+            continue
         for num in num_cols:
             groups = [vals[num].dropna().values for _, vals in df.groupby(cat)]
-            if len(groups) > 1:
-                f, p = f_oneway(*groups)
-                df_between = len(groups) - 1
-                df_within = len(df) - len(groups)
-                eta2 = eta_squared_anova(f, df_between, df_within)
-                results["anova"][f"{cat}__vs__{num}"] = {
-                    "f_stat": safe_float(f),
-                    "p_value": safe_float(p),
-                    "eta_squared": safe_float(eta2),
-                }
+            if len(groups) > 1 and all(len(g) > 1 for g in groups):
+                try:
+                    f, p = f_oneway(*groups)
+                    df_between = len(groups) - 1
+                    df_within = len(df) - len(groups)
+                    eta2 = eta_squared_anova(f, df_between, df_within)
+                    results["anova"][f"{cat}__vs__{num}"] = {
+                        "f_stat": safe_float(f),
+                        "p_value": safe_float(p),
+                        "eta_squared": safe_float(eta2),
+                    }
+                except Exception as e:
+                    results["anova"][f"{cat}__vs__{num}"] = {
+                        "f_stat": None,
+                        "p_value": None,
+                        "eta_squared": None,
+                        "note": str(e)
+                    }
 
     return results
 
@@ -735,14 +758,11 @@ def safe_isolation_forest(X, contamination=0.05, random_state=42):
     if X.empty or X.shape[1] < 2:
         return None
 
-    # Loại bỏ inf, -inf → NaN, rồi thay bằng 0
     X_clean = X.replace([np.inf, -np.inf], np.nan).fillna(0)
 
-    # Đảm bảo tất cả giá trị là hữu hạn
     if not np.isfinite(X_clean.values).all():
         return None
 
-    # Chạy Isolation Forest
     try:
         iso = IsolationForest(contamination=contamination, random_state=random_state)
         return iso.fit_predict(X_clean)
@@ -802,7 +822,7 @@ def generate_advanced_eda(df: pd.DataFrame) -> dict:
         "patterns": analyze_patterns(df),
         "redundancy" : analyze_redundancy(df),
         "timeseries": analyze_timeseries(df, freq="D"),
-        # "rfm": analyze_rfm(df)  # business metric nếu có dữ liệu bán hàng
+        # "rfm": analyze_rfm(df)  
     }
 
 def analyze_redundancy(df, vif_threshold=5, corr_threshold=0.9):
@@ -918,6 +938,10 @@ def analyze_timeseries(df, freq="D"):
 async def parse_file(file: UploadFile = File(...)):
     name = file.filename.lower()
     content = await file.read()
+    
+    file_size_mb = len(content) / (1024 * 1024)
+    logger.info(f"Received file: {file.filename} ({file_size_mb:.2f} MB)")
+
     try:
         if name.endswith(".csv"):
             df = pd.read_csv(BytesIO(content), nrows=10000)
@@ -968,7 +992,12 @@ async def parse_file(file: UploadFile = File(...)):
         "descriptive": descriptive,
         "visualizations": visualizations,
         "relationships": relationships,
-        "advanced": advanced
+        "advanced": advanced,
+        "metadata": {
+            "original_file_size_mb": round(file_size_mb, 2),
+            "final_shape": df.shape,
+            "sampled": file_size_mb > 10 
+        }
     }
 
     # ✅ In sau khi đã có result
@@ -984,3 +1013,12 @@ async def parse_file(file: UploadFile = File(...)):
         content=cleaned,
         media_type="application/json"
     )
+
+@app.get("/api/health")
+def health():
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "uptime": "unknown", 
+        "memory_usage_mb": "not tracked"
+    }

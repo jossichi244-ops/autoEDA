@@ -19,3 +19,6 @@ plotly
 pydantic
 orjson
 joblib  
+
+pytest>=8.0.0
+pytest-cov>=5.0.0
