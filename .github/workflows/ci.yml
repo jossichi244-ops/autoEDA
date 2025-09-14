@@ -20,7 +20,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-cov
 
       - name: Run tests
         run: |
@@ -28,7 +27,7 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          pytest tests/ --cov=app --cov-report=xml --cov-report=term-missing
+          pytest tests/ --cov=main --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
