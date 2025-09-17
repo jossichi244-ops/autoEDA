@@ -135,13 +135,21 @@ def convert_numpy_types(obj):
         return float(obj) if not np.isnan(obj) and np.isfinite(obj) else None
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
-    elif isinstance(obj, pd.Timestamp):  
-        return str(obj)          
+    elif isinstance(obj, pd.Timestamp):
+        return str(obj)
     elif isinstance(obj, dict):
-        return {key: convert_numpy_types(value) for key, value in obj.items()}
+        # ✅ XỬ LÝ KHÓA: Chuyển pd.Timestamp thành str nếu là key
+        new_dict = {}
+        for key, value in obj.items():
+            if isinstance(key, pd.Timestamp):
+                key = str(key)
+            elif isinstance(key, (np.integer, np.floating)):
+                key = convert_numpy_types(key)  # cũng xử lý numpy key
+            new_dict[key] = convert_numpy_types(value)
+        return new_dict
     elif isinstance(obj, list):
         return [convert_numpy_types(item) for item in obj]
-    elif pd.isna(obj): 
+    elif pd.isna(obj):
         return None
     return obj
 

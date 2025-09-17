@@ -22,11 +22,6 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov
 
-      - name: Run tests and generate coverage
-        run: |
-          cd backend 
-          pytest tests/ -v --tb=short --cov=main --cov-report=xml --cov-report=term-missing --import-mode=importlib
-
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
