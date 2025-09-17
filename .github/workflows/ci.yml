@@ -20,15 +20,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-cov  # đảm bảo có pytest-cov
-
-      - name: Add backend to Python Path
-        run: |
-          echo "$PWD" >> $GITHUB_PATH
+          pip install pytest pytest-cov
 
       - name: Run tests and generate coverage
         run: |
-          pytest tests/ -v --tb=short --cov=main --cov-report=xml --cov-report=term-missing
+          cd backend 
+          pytest tests/ -v --tb=short --cov=main --cov-report=xml --cov-report=term-missing --import-mode=importlib
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
