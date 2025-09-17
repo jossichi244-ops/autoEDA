@@ -135,6 +135,8 @@ def convert_numpy_types(obj):
         return float(obj) if not np.isnan(obj) and np.isfinite(obj) else None
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
+    elif isinstance(obj, pd.Timestamp):  
+        return str(obj)          
     elif isinstance(obj, dict):
         return {key: convert_numpy_types(value) for key, value in obj.items()}
     elif isinstance(obj, list):
@@ -934,6 +936,140 @@ def analyze_timeseries(df, freq="D"):
 
     return results
 
+def extract_eda_insights(result: dict) -> list:
+    """
+    Automatically extract insights from EDA results.
+    Input: result (dict) — output from the full AutoEDA pipeline.
+    Output: list[str] — list of insights in text format.
+    """
+    insights = []
+
+    # --- 1. Missing data ---
+    missing_summary = result.get("inspection", {}).get("missing_summary", {})
+    top_missing = missing_summary.get("top_missing_columns", {})
+    for col, pct in top_missing.items():
+        if pct > 0.3:  # >30%
+            insights.append(f"❗ Column '{col}' has a high missing rate ({pct*100:.1f}%) → consider dropping or imputing.")
+
+    # --- 2. Duplicate rows ---
+    duplicates = result.get("inspection", {}).get("duplicates", {})
+    dup_count = duplicates.get("duplicate_count", 0)
+    if dup_count > 0:
+        insights.append(f"🔁 Detected {dup_count} duplicate rows → should be checked and handled.")
+
+    # --- 3. Constant columns ---
+    columns = result.get("inspection", {}).get("columns", {})
+    for col, col_info in columns.items():
+        if col_info.get("is_constant", False):
+            insights.append(f"📌 Column '{col}' is constant (only one unique value) → can be removed.")
+
+    # --- 4. High cardinality categorical ---
+    for col, col_info in columns.items():
+        if col_info.get("inferred_type") in ["categorical", "text"] and col_info.get("unique_percent", 0) > 0.9 and col_info.get("unique_count", 0) > 50:
+            insights.append(f"🔢 Column '{col}' has very high cardinality ({col_info.get('unique_count')} unique values) → may represent an ID, should be handled specially.")
+
+    # --- 5. Numeric insights: skew, outliers ---
+    descriptive = result.get("descriptive", {})
+    numeric_stats = descriptive.get("numeric", {})
+    for col, stats in numeric_stats.items():
+        skew_val = stats.get("skew", 0)
+        if abs(skew_val) > 1:
+            direction = "right" if skew_val > 0 else "left"
+            insights.append(f"📈 Variable '{col}' is skewed to the {direction} (skew = {skew_val:.2f}) → consider transformation (log, box-cox).")
+
+        outliers = stats.get("outliers", 0)
+        total = stats.get("count", 1)
+        outlier_pct = outliers / total * 100
+        if outlier_pct > 5:
+            insights.append(f"⚠️ Variable '{col}' has {outliers} outliers ({outlier_pct:.1f}%) → investigate cause or handle accordingly.")
+
+    # --- 6. Imbalanced categorical ---
+    categorical_stats = descriptive.get("categorical", {})
+    for col, stats in categorical_stats.items():
+        top_values = stats.get("top_values", [])
+        if top_values:
+            top_val = top_values[0]
+            if top_val.get("percent", 0) > 80:
+                insights.append(f"⚖️ Column '{col}' is highly imbalanced: '{top_val['value']}' accounts for {top_val['percent']}% → may bias the model.")
+
+    # --- 7. Suggested actions from inspection ---
+    for col, col_info in columns.items():
+        suggestions = col_info.get("suggested_actions", [])
+        for suggestion in suggestions:
+            insights.append(f"💡 Suggestion for column '{col}': {suggestion}")
+
+    # --- 8. ANOVA & Chi-square significance ---
+    advanced = result.get("advanced", {})
+    significance = advanced.get("significance", {})
+
+    # ANOVA
+    anova_results = significance.get("anova", {})
+    for key, stats in anova_results.items():
+        p_val = stats.get("p_value", 1)
+        eta2 = stats.get("eta_squared", 0)
+        if p_val is not None and p_val < 0.05:
+            cat, num = key.split("__vs__")
+            effect = "very small"
+            if eta2 >= 0.14:
+                effect = "large"
+            elif eta2 >= 0.06:
+                effect = "medium"
+            elif eta2 >= 0.01:
+                effect = "small"
+            insights.append(f"✅ ANOVA: Categorical variable '{cat}' significantly affects '{num}' (p={p_val:.3f}, η²={eta2:.3f} → {effect} effect size).")
+
+    # Chi-square
+    chi2_results = significance.get("chi2", {})
+    for key, stats in chi2_results.items():
+        p_val = stats.get("p_value", 1)
+        cramers_v = stats.get("cramers_v", 0)
+        if p_val is not None and p_val < 0.05:
+            col1, col2 = key.split("__vs__")
+            strength = "very weak"
+            if cramers_v >= 0.5:
+                strength = "very strong"
+            elif cramers_v >= 0.3:
+                strength = "moderate to strong"
+            elif cramers_v >= 0.1:
+                strength = "weak to moderate"
+            insights.append(f"✅ Chi-square: Significant relationship between '{col1}' and '{col2}' (p={p_val:.3f}, V={cramers_v:.3f} → {strength} association).")
+
+    # --- 9. Clustering quality ---
+    clustering = advanced.get("clustering", {})
+    sil_score = clustering.get("silhouette_score")
+    if sil_score is not None:
+        if sil_score > 0.5:
+            insights.append(f"🎯 Data can be well clustered (silhouette score = {sil_score:.3f}) → consider KMeans or cluster analysis.")
+        elif sil_score < 0.2:
+            insights.append(f"📉 Data is difficult to cluster (silhouette score = {sil_score:.3f}) → may lack clear cluster structure.")
+
+    # --- 10. Anomalies (Isolation Forest) ---
+    patterns = advanced.get("patterns", {})
+    anomalies = patterns.get("anomalies", {})
+    outlier_flags = anomalies.get("outlier_flags", [])
+    if len(outlier_flags) > 0:
+        n_outliers = sum(1 for x in outlier_flags if x == -1)
+        pct_outliers = n_outliers / len(outlier_flags) * 100
+        if n_outliers > 0:
+            insights.append(f"🚨 Detected {n_outliers} anomalies ({pct_outliers:.1f}%) using Isolation Forest → investigate potential fraud or data entry errors.")
+
+    # --- 11. Multicollinearity (VIF) ---
+    redundancy = advanced.get("redundancy", {})
+    vif_list = redundancy.get("vif", [])
+    high_vif = [item for item in vif_list if item.get("vif", 0) > 5]
+    if high_vif:
+        high_vif_cols = ", ".join([f"'{item['feature']}' (VIF={item['vif']:.1f})" for item in high_vif])
+        insights.append(f"🔗 Multicollinearity warning: The following variables have VIF > 5 → {high_vif_cols}")
+
+    # --- 12. Sample size warning ---
+    shape = result.get("inspection", {}).get("shape", {})
+    total_rows = shape.get("rows", 0)
+    if total_rows < 50:
+        insights.append(f"📉 Dataset is too small (only {total_rows} rows) → statistical results may not be reliable.")
+
+    # Remove duplicates and return
+    return list(dict.fromkeys(insights))
+
 @app.post("/api/parse-file")
 async def parse_file(file: UploadFile = File(...)):
     name = file.filename.lower()
@@ -982,6 +1118,7 @@ async def parse_file(file: UploadFile = File(...)):
 
     advanced = generate_advanced_eda(df)
 
+
     
     result = {
         "schema": schema,
@@ -993,13 +1130,17 @@ async def parse_file(file: UploadFile = File(...)):
         "visualizations": visualizations,
         "relationships": relationships,
         "advanced": advanced,
+        
         "metadata": {
             "original_file_size_mb": round(file_size_mb, 2),
             "final_shape": df.shape,
             "sampled": file_size_mb > 10 
         }
     }
+    insights = extract_eda_insights(result)
 
+    # ✅ THÊM insights VÀO result
+    result["insights"] = insights
     # ✅ In sau khi đã có result
     print("All columns:", df.columns.tolist())
     print("Numeric cols:", list(descriptive["numeric"].keys()))
@@ -1008,7 +1149,7 @@ async def parse_file(file: UploadFile = File(...)):
     for col in list(descriptive["categorical"].keys()):
         print(f"  {col}: {df[col].nunique()} unique values")
     cleaned = convert_numpy_types(result)
-    
+
     return JSONResponse(
         content=cleaned,
         media_type="application/json"

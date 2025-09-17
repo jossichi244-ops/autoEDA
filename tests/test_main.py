@@ -26,10 +26,8 @@ def test_parse_csv_small():
     assert data["metadata"]["sampled"] is False
 
 def test_parse_csv_large_sampled():
-    # Tạo file CSV giả lập 20MB (khoảng 100k dòng)
     rows = ["name,age\n"] + [f"User{i},{i % 100}\n" for i in range(100000)]
     csv_content = "".join(rows).encode("utf-8")
-    
     response = client.post(
         "/api/parse-file",
         files={"file": ("large_data.csv", csv_content, "text/csv")}
@@ -37,5 +35,5 @@ def test_parse_csv_large_sampled():
     assert response.status_code == 200
     data = response.json()
     assert data["metadata"]["original_file_size_mb"] > 10
-    assert data["metadata"]["sampled"] is True  # Phải là sample
-    assert len(data["preview"]) <= 10  # Chỉ lấy 10 mẫu
+    assert data["metadata"]["sampled"] is True
+    assert len(data["preview"]) <= 10
