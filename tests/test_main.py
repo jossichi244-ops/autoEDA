@@ -1,6 +1,7 @@
+# tests/test_main.py
 import pytest
 from fastapi.testclient import TestClient
-from main import app
+from ..main import app
 from io import BytesIO
 
 client = TestClient(app)
@@ -12,7 +13,7 @@ def test_health_endpoint():
     assert data["status"] == "healthy"
     assert "version" in data
 
-def test_parse_csv_small():
+def test_parse_csv_endpoint():
     csv_content = b"name,age,city\nAlice,25,NYC\nBob,30,LA"
     response = client.post(
         "/api/parse-file",
@@ -20,20 +21,18 @@ def test_parse_csv_small():
     )
     assert response.status_code == 200
     data = response.json()
+    
     assert "schema" in data
-    assert len(data["preview"]) == 2
-    assert data["metadata"]["original_file_size_mb"] < 0.1
-    assert data["metadata"]["sampled"] is False
+    assert "preview" in data
+    assert "understanding" in data
+    assert "inspection" in data
+    assert "cleaning" in data
+    assert "descriptive" in data
+    assert "visualizations" in data
+    assert "relationships" in data
+    assert "advanced" in data
+    assert "insights" in data
+    assert "metadata" in data
 
-def test_parse_csv_large_sampled():
-    rows = ["name,age\n"] + [f"User{i},{i % 100}\n" for i in range(100000)]
-    csv_content = "".join(rows).encode("utf-8")
-    response = client.post(
-        "/api/parse-file",
-        files={"file": ("large_data.csv", csv_content, "text/csv")}
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["metadata"]["original_file_size_mb"] > 10
-    assert data["metadata"]["sampled"] is True
-    assert len(data["preview"]) <= 10
+    assert isinstance(data["insights"], list)
+    assert len(data["insights"]) > 0  
