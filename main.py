@@ -944,11 +944,425 @@ def analyze_timeseries(df, freq="D"):
 
     return results
 
+def generate_business_report(eda_results: dict) -> str:
+    """
+    Generate an executive-level business report from EDA results.
+    The style mimics a senior data analyst/consultant with 10+ years of experience.
+    """
+
+    sections = []
+
+    # =====================================================
+    # 1. Executive Summary
+    # =====================================================
+    summary = "📌 Executive Summary\n"
+
+    # 1️⃣ Tổng quan dataset
+    inspection = eda_results.get("inspection", {})
+    shape = inspection.get("shape", {})
+    rows = shape.get("rows", 0)
+    cols = shape.get("columns", 0)
+    summary += f"- Dataset gồm {rows:,} bản ghi và {cols} biến.\n"
+
+    # 2️⃣ Missing data
+    missing_summary = inspection.get("missing_summary", {})
+    pct_missing = missing_summary.get("percent_missing", 0)
+    if pct_missing > 0.1:
+        summary += f"- ⚠️ Dữ liệu thiếu đáng kể (~{pct_missing*100:.1f}%) → cần xử lý trước khi phân tích sâu.\n"
+    elif pct_missing > 0:
+        summary += f"- ⚠️ Một số giá trị bị thiếu (~{pct_missing*100:.1f}%), nên kiểm tra nguyên nhân.\n"
+    else:
+        summary += "- ✅ Dữ liệu đầy đủ — không có giá trị bị thiếu.\n"
+
+    # 3️⃣ Clustering / Segmentation
+    advanced = eda_results.get("advanced", {})
+    cluster_info = advanced.get("clustering", {})
+    if cluster_info and "centroids" in cluster_info:
+        centroids = cluster_info.get("centroids", [])
+        n_clusters = len(centroids)
+        silhouette = cluster_info.get("silhouette_score", 0)
+        summary += f"- 👥 Phân tích phân cụm phát hiện {n_clusters} nhóm chính (điểm silhouette = {silhouette:.3f} → cấu trúc rõ ràng).\n"
+        for i, c in enumerate(centroids):
+            # Lấy đặc trưng nổi bật (giá trị trung tâm)
+            top_features = ", ".join(f"{k}≈{round(v,2)}" for k, v in c.items() if isinstance(v, (int, float)))
+            summary += f"    Nhóm {i+1}: đặc trưng bởi {top_features}\n"
+    else:
+        summary += "- ℹ️ Không thực hiện phân cụm hoặc dữ liệu không phù hợp để phân nhóm.\n"
+
+    # 4️⃣ Time series trends
+    ts_info = advanced.get("timeseries", {})
+    if ts_info and "aggregated" in ts_info and len(ts_info["aggregated"]) > 0:
+        # Lấy ngày đầu và cuối
+        dates = [item["date"] for item in ts_info["aggregated"] if "date" in item]
+        if dates:
+            start_date = min(dates)
+            end_date = max(dates)
+            summary += f"- 📈 Phân tích chuỗi thời gian từ {start_date} đến {end_date}:\n"
+            # Kiểm tra có trend/seasonal không (dựa trên sự tồn tại của decomposition)
+            if "trend" in ts_info and len(ts_info["trend"]) > 0:
+                summary += "    Xu hướng dài hạn và tính mùa vụ được phát hiện → có thể lập kế hoạch theo chu kỳ.\n"
+            if ts_info.get("outliers") and len(ts_info["outliers"]) > 0:
+                n_outliers_ts = len(ts_info["outliers"])
+                summary += f"    🚨 Phát hiện {n_outliers_ts} điểm bất thường trong chuỗi thời gian → cần điều tra nguyên nhân (khuyến mãi, sự kiện, lỗi hệ thống...).\n"
+    else:
+        summary += "- ℹ️ Không phát hiện hoặc không đủ dữ liệu để phân tích chuỗi thời gian.\n"
+
+    # 5️⃣ Anomalies (Isolation Forest)
+    patterns = advanced.get("patterns", {})
+    anomalies = patterns.get("anomalies", {})
+    if anomalies and "outlier_flags" in anomalies:
+        outlier_flags = anomalies["outlier_flags"]
+        n_outliers = sum(1 for f in outlier_flags if f == -1)
+        if n_outliers > 0:
+            pct_outliers = n_outliers / len(outlier_flags) * 100
+            summary += f"- 🚨 Đã phát hiện {n_outliers} điểm dữ liệu bất thường ({pct_outliers:.1f}%) → cần điều tra để loại trừ gian lận hoặc lỗi nhập liệu.\n"
+        else:
+            summary += "- ✅ Không phát hiện điểm dữ liệu bất thường nào.\n"
+    else:
+        summary += "- ℹ️ Không thực hiện phân tích bất thường hoặc không đủ biến số để chạy thuật toán.\n"
+
+    sections.append(summary)
+
+    # =====================================================
+    # 2. Data Quality & Reliability
+    # =====================================================
+    dq = "📊 Data Quality & Reliability\n"
+    inspection = eda_results.get("inspection", {})
+    shape = inspection.get("shape", {})
+    rows = shape.get("rows", 0)
+    cols = shape.get("columns", 0)
+    total_cells = rows * cols
+
+    # 1. Missing data
+    missing_summary = inspection.get("missing_summary", {})
+    missing_cells = missing_summary.get("total_missing", 0)
+    missing_pct = (missing_cells / total_cells * 100) if total_cells > 0 else 0
+    dq += f"- Có {missing_cells:,} ô trống (~{missing_pct:.1f}% tổng dữ liệu). "
+    if missing_pct > 10:
+        dq += "⚠️ Mức độ thiếu cao — có thể làm sai lệch kết quả phân tích và dự báo nếu không xử lý.\n"
+    elif missing_pct > 0:
+        dq += "ℹ️ Nên kiểm tra nguyên nhân thiếu (lỗi nhập liệu, không bắt buộc...) và quyết định impute hay loại bỏ.\n"
+    else:
+        dq += "✅ Dữ liệu đầy đủ — không có ô trống.\n"
+
+    # 2. Duplicate rows
+    duplicates = inspection.get("duplicates", {})
+    dup_count = duplicates.get("duplicate_count", 0)
+    dup_pct = (dup_count / rows * 100) if rows > 0 else 0
+    if dup_count > 0:
+        dq += f"- Phát hiện {dup_count:,} bản ghi trùng lặp (~{dup_pct:.1f}% tổng số dòng). "
+        dq += "⚠️ Cảnh báo: Có thể dẫn đến phóng đại doanh thu, số lượng giao dịch hoặc khách hàng trong báo cáo.\n"
+    else:
+        dq += "- ✅ Dữ liệu không có bản ghi trùng lặp — đảm bảo tính duy nhất của từng quan sát.\n"
+
+    # 3. Constant columns
+    columns = inspection.get("columns", {})
+    const_cols = [col for col, info in columns.items() if info.get("is_constant", False)]
+    if const_cols:
+        dq += f"- Có {len(const_cols)} biến hằng số (ít giá trị phân tích): {', '.join(const_cols)} → nên xem xét loại bỏ để giảm nhiễu.\n"
+    else:
+        dq += "- ✅ Không có biến hằng số — tất cả cột đều mang thông tin phân biệt.\n"
+
+    # 4. Overall Data Quality Assessment (Tổng kết đánh giá)
+    quality_score = 10
+    if missing_pct > 20:
+        quality_score -= 4
+    elif missing_pct > 5:
+        quality_score -= 2
+
+    if dup_count > 0 and dup_pct > 5:
+        quality_score -= 3
+    elif dup_count > 0:
+        quality_score -= 1
+
+    if len(const_cols) > 2:
+        quality_score -= 2
+    elif len(const_cols) > 0:
+        quality_score -= 1
+
+    dq += "\n📈 Đánh giá tổng quan chất lượng dữ liệu: "
+    if quality_score >= 9:
+        dq += "✅ Rất tốt — Dữ liệu sạch, đáng tin cậy để đưa ra quyết định chiến lược."
+    elif quality_score >= 7:
+        dq += "🟡 Khá tốt — Có một số vấn đề nhỏ, cần xử lý trước khi huấn luyện mô hình hoặc phân tích sâu."
+    elif quality_score >= 5:
+        dq += "⚠️ Trung bình — Dữ liệu có vấn đề đáng kể (thiếu, trùng, hằng số) → cần làm sạch kỹ trước khi sử dụng."
+    else:
+        dq += "🔴 Kém — Dữ liệu không đáng tin cậy do tỷ lệ thiếu/trùng quá cao → nên thu thập hoặc kiểm tra lại dữ liệu gốc."
+
+    sections.append(dq)
+
+    # =====================================================
+    # 3. Business Insights
+    # =====================================================
+    insights = "🔎 Business Insights\n"
+
+    # Segmentation
+    cluster = eda_results["advanced"].get("clustering", {})
+    if cluster:
+        centroids = cluster.get("centroids", [])
+        sizes = cluster.get("sizes", {})  # đảm bảo không lỗi nếu thiếu
+        insights += (
+            f"- Dữ liệu được phân chia thành {len(centroids)} nhóm chính "
+            f"(các nhóm có hành vi/đặc điểm khác biệt rõ rệt).\n"
+        )
+        for i, c in enumerate(centroids):
+            size = sizes.get(i, 0)
+            top_features = ", ".join(f"{k}≈{round(v,2)}" for k, v in c.items())
+            insights += f"    Nhóm {i} ({size} đối tượng): đặc trưng bởi {top_features}. → Chúng ta có thể thiết kế chiến lược riêng cho nhóm này.\n"
+
+    # Time Series
+    ts = eda_results["advanced"].get("timeseries", {})
+    if ts:
+        date_col = ts.get("date_col", "date")
+        value_col = ts.get("value_col", "value")
+        aggregated = ts.get("aggregated", [])
+        if aggregated:
+            dates = [item.get("date") for item in aggregated if "date" in item]
+            if dates:
+                start_date = min(dates)
+                end_date = max(dates)
+                insights += f"- Phân tích chuỗi thời gian {value_col} từ {start_date} đến {end_date}:\n"
+        if ts.get("seasonal") and len(ts["seasonal"]) > 0:
+            insights += "    Có tính mùa vụ rõ rệt (lặp lại theo chu kỳ) → phù hợp để lập kế hoạch tồn kho, chiến dịch marketing định kỳ.\n"
+        if ts.get("trend") and len(ts["trend"]) > 0:
+            first_val = ts["trend"][0].get("value", 0)
+            last_val = ts["trend"][-1].get("value", 0)
+            if last_val > first_val:
+                insights += "    Xu hướng tăng dần theo thời gian → nhu cầu/sản lượng đang phát triển.\n"
+            elif last_val < first_val:
+                insights += "    Xu hướng giảm dần theo thời gian → cần điều tra nguyên nhân và có biện pháp can thiệp.\n"
+        if ts.get("outliers") and len(ts["outliers"]) > 0:
+            insights += f"    Phát hiện {len(ts['outliers'])} điểm bất thường → có thể do sự kiện đặc biệt (khuyến mãi, lỗi hệ thống) → cần ghi chú để không ảnh hưởng dự báo.\n"
+
+    # Key Drivers
+    sig = eda_results["advanced"].get("significance", {})
+    if sig.get("anova"):
+        for key, stats in sig["anova"].items():
+            if stats.get("p_value", 1) < 0.05:
+                cat, num = key.split("__vs__")
+                p_val = stats.get("p_value", 0)
+                eta2 = stats.get("eta_squared", 0)
+
+                # Xác định mức độ ảnh hưởng
+                effect_level = "nhỏ"
+                if eta2 >= 0.14:
+                    effect_level = "lớn"
+                elif eta2 >= 0.06:
+                    effect_level = "trung bình"
+
+                insights += (
+                    f"- ✅ Kiểm định ANOVA: Biến phân loại {cat} có ảnh hưởng có ý nghĩa thống kê tới {num} "
+                    f"(p = {p_val:.3f} < 0.05, η² = {eta2:.3f} → mức độ ảnh hưởng {effect_level}).\n"
+                    f"   → Tại sao kết luận như vậy? Vì p-value < 0.05 cho thấy sự khác biệt giữa các nhóm trong '{cat}' là không do ngẫu nhiên. "
+                    f"η² cho biết '{cat}' giải thích được {eta2*100:.1f}% sự biến động của '{num}'.\n"
+                    f"   → Ý nghĩa: Các nhóm trong '{cat}' có giá trị trung bình '{num}' khác biệt rõ rệt. "
+                    f"Có thể tối ưu '{num}' bằng cách điều chỉnh '{cat}'.\n"
+                )
+
+    # Key Drivers — Chi-square
+    if sig.get("chi2"):
+        for key, stats in sig["chi2"].items():
+            if stats.get("p_value", 1) < 0.05:
+                c1, c2 = key.split("__vs__")
+                p_val = stats.get("p_value", 0)
+                cramers_v = stats.get("cramers_v", 0)
+
+                # Xác định mức độ liên hệ
+                strength = "yếu"
+                if cramers_v >= 0.5:
+                    strength = "rất mạnh"
+                elif cramers_v >= 0.3:
+                    strength = "trung bình đến mạnh"
+                elif cramers_v >= 0.1:
+                    strength = "yếu đến trung bình"
+
+                insights += (
+                    f"- ✅ Kiểm định Chi-square: Có mối quan hệ có ý nghĩa thống kê giữa {c1} và {c2} "
+                    f"(p = {p_val:.3f} < 0.05, Cramér’s V = {cramers_v:.3f} → mức độ liên hệ {strength}).\n"
+                    f"   → Tại sao kết luận như vậy? Vì p-value < 0.05 chứng tỏ mối liên hệ không phải ngẫu nhiên. "
+                    f"Cramér’s V đo lường mức độ liên hệ — giá trị {cramers_v:.3f} cho thấy '{c1}' và '{c2}' có xu hướng thay đổi cùng nhau.\n"
+                    f"   → Ý nghĩa: Biết giá trị của '{c2}' giúp dự đoán '{c1}' tốt hơn (và ngược lại). "
+                
+                )
+
+    sections.append(insights)
+
+    # =====================================================
+    # 4. Risks & Opportunities
+    # =====================================================
+    risks = "⚠️ Risks & Opportunities\n"
+
+    # Multicollinearity
+    vif_list = eda_results["advanced"].get("redundancy", {}).get("vif", [])
+    high_vif = [item for item in vif_list if item["vif"] > 5]
+    if high_vif:
+        risky_vars = ", ".join([item["feature"] for item in high_vif])
+        risks += f"- Một số biến có thông tin trùng lặp cao ({risky_vars}). → Điều này có thể gây nhiễu khi dự báo, cần chọn lọc biến quan trọng nhất để đảm bảo mô hình ổn định.\n"
+
+    # Anomalies
+    anomalies = eda_results["advanced"].get("patterns", {}).get("anomalies", {})
+    if anomalies.get("outlier_flags"):
+        n_outliers = sum(1 for f in anomalies["outlier_flags"] if f == -1)
+        risks += (
+            f"- Phát hiện {n_outliers} điểm dữ liệu bất thường. "
+            f"→ Đây có thể là gian lận, sự kiện đặc biệt, hoặc lỗi hệ thống. "
+            f"Nếu không xử lý, có thể dẫn tới sai lệch trong báo cáo hoặc quyết định kinh doanh.\n"
+        )
+
+    sections.append(risks)
+
+    # =====================================================
+    # 5. Strategic Recommendations
+    # =====================================================
+    rec = "💡 Strategic Recommendations\n\n"
+
+    # --- 1. Ngắn hạn: Dựa trên Data Quality Issues ---
+    inspection = eda_results.get("inspection", {})
+    missing_summary = inspection.get("missing_summary", {})
+    duplicates = inspection.get("duplicates", {})
+    columns = inspection.get("columns", {})
+
+    short_term_actions = []
+
+    # Missing data
+    pct_missing = missing_summary.get("percent_missing", 0)
+    if pct_missing > 0.05:  # >5%
+        top_missing_col = next(iter(missing_summary.get("top_missing_columns", {})), None)
+        if top_missing_col:
+            short_term_actions.append(f"Làm sạch dữ liệu thiếu (đặc biệt cột '{top_missing_col}') bằng imputation hoặc loại bỏ.")
+
+    # Duplicates
+    dup_count = duplicates.get("duplicate_count", 0)
+    if dup_count > 0:
+        short_term_actions.append(f"Loại bỏ {dup_count:,} bản ghi trùng lặp để đảm bảo tính duy nhất và độ chính xác thống kê.")
+
+    # Constant columns
+    const_cols = [col for col, info in columns.items() if info.get("is_constant", False)]
+    if const_cols:
+        short_term_actions.append(f"Loại bỏ {len(const_cols)} biến hằng số: {', '.join(const_cols)}.")
+
+    if short_term_actions:
+        rec += "1. Ngắn hạn (0–3 tháng) — Ưu tiên làm sạch và chuẩn hóa dữ liệu:\n"
+        for i, action in enumerate(short_term_actions, 1):
+            rec += f"   {i}. {action}\n"
+    else:
+        rec += "1. Ngắn hạn (0–3 tháng) — Dữ liệu đã sạch, không cần xử lý khẩn cấp.\n"
+
+    rec += "\n"
+
+    # --- 2. Trung hạn: Dựa trên Segmentation / Key Drivers / Relationships ---
+    advanced = eda_results.get("advanced", {})
+    clustering = advanced.get("clustering", {})
+    significance = advanced.get("significance", {})
+    patterns = advanced.get("patterns", {})
+
+    mid_term_actions = []
+
+    # Nếu có phân cụm tốt
+    sil_score = clustering.get("silhouette_score", 0)
+    if sil_score > 0.5 and "centroids" in clustering:
+        n_clusters = len(clustering["centroids"])
+        mid_term_actions.append(f"Phát triển chiến lược Marketing/CRM theo {n_clusters} phân khúc khách hàng đã xác định (silhouette={sil_score:.2f}).")
+
+    # Nếu có mối quan hệ ANOVA mạnh
+    anova_results = significance.get("anova", {})
+    strong_anova = [
+        key for key, stats in anova_results.items()
+        if stats.get("p_value", 1) < 0.05 and stats.get("eta_squared", 0) >= 0.06
+    ]
+    if strong_anova:
+        cat, num = strong_anova[0].split("__vs__")
+        mid_term_actions.append(f"Tối ưu '{num}' bằng cách điều chỉnh '{cat}' — đã được chứng minh có ảnh hưởng mạnh (η² > 0.06).")
+
+    # Nếu có mối quan hệ Chi-square mạnh
+    chi2_results = significance.get("chi2", {})
+    strong_chi2 = [
+        key for key, stats in chi2_results.items()
+        if stats.get("p_value", 1) < 0.05 and stats.get("cramers_v", 0) >= 0.3
+    ]
+    if strong_chi2:
+        c1, c2 = strong_chi2[0].split("__vs__")
+        mid_term_actions.append(f"Cá nhân hóa trải nghiệm/dịch vụ dựa trên mối quan hệ giữa '{c1}' và '{c2}' (Cramér’s V > 0.3).")
+
+    if mid_term_actions:
+        rec += "2. Trung hạn (3–12 tháng) — Khai thác insight để tối ưu vận hành:\n"
+        for i, action in enumerate(mid_term_actions, 1):
+            rec += f"   {i}. {action}\n"
+    else:
+        rec += "2. Trung hạn (3–12 tháng) — Chưa phát hiện insight mạnh để hành động — cần thu thập thêm dữ liệu hoặc thử nghiệm A/B.\n"
+
+    rec += "\n"
+
+    # --- 3. Dài hạn: Dựa trên Time Series / Predictive Potential / Anomalies ---
+    timeseries = advanced.get("timeseries", {})
+    anomalies = patterns.get("anomalies", {})
+
+    long_term_actions = []
+
+    # Nếu có chuỗi thời gian
+    if timeseries and timeseries.get("aggregated"):
+        value_col = timeseries.get("value_col", "giá trị")
+        long_term_actions.append(f"Xây dựng mô hình dự báo {value_col} theo thời gian để lập kế hoạch phù hợp.")
+
+    # Nếu có bất thường
+    if anomalies and "outlier_flags" in anomalies:
+        n_outliers = sum(1 for f in anomalies["outlier_flags"] if f == -1)
+        if n_outliers > 0:
+            long_term_actions.append("Triển khai hệ thống phát hiện bất thường tự động (real-time anomaly detection) để cảnh báo gian lận hoặc lỗi hệ thống.")
+
+    # Nếu có feature importance (giả sử bạn có target)
+    feature_importance = patterns.get("feature_importance", {})
+    if isinstance(feature_importance, dict) and len(feature_importance) > 0:
+        top_feature = next(iter(feature_importance))
+        long_term_actions.append(f"Xây dựng mô hình dự báo dựa trên các biến quan trọng nhất (đứng đầu: '{top_feature}').")
+
+    if long_term_actions:
+        rec += "3. Dài hạn (1–3 năm) — Đầu tư vào hệ thống phân tích tiên tiến:\n"
+        for i, action in enumerate(long_term_actions, 1):
+            rec += f"   {i}. {action}\n"
+    else:
+        rec += "3. Dài hạn (1–3 năm) — Hiện tại chưa đủ điều kiện để triển khai hệ thống dự báo — cần nâng cấp hạ tầng dữ liệu trước.\n"
+
+    rec += "\n"
+
+    # --- 4. Governance: Dựa trên Data Quality & Monitoring Needs ---
+    governance_actions = []
+
+    if pct_missing > 0.1 or dup_count > 0 or const_cols:
+        governance_actions.append("Thiết lập Dashboard Giám sát Chất lượng Dữ liệu (Data Quality Dashboard) theo thời gian thực.")
+
+    if "advanced" in eda_results and "redundancy" in eda_results["advanced"]:
+        vif_list = eda_results["advanced"]["redundancy"].get("vif", [])
+        high_vif_cols = [item["feature"] for item in vif_list if item.get("vif", 0) > 5]
+        if high_vif_cols:
+            governance_actions.append(f"Thiết lập quy tắc quản trị dữ liệu: cấm đưa đồng thời các biến có VIF > 5 vào cùng một mô hình ({', '.join(high_vif_cols[:3])}...).")
+
+    if governance_actions:
+        rec += "4. Governance & DataOps — Xây dựng nền tảng bền vững:\n"
+        for i, action in enumerate(governance_actions, 1):
+            rec += f"   {i}. {action}\n"
+    else:
+        rec += "4. Governance & DataOps — Chất lượng dữ liệu hiện tại tốt — có thể hoãn đầu tư hệ thống giám sát chuyên sâu.\n"
+
+    sections.append(rec)
+
+    # =====================================================
+    # 6. Appendix (Technical Notes)
+    # =====================================================
+    appendix = "📑 Appendix / Technical Notes\n"
+    appendix += "- Phân tích được thực hiện tự động (Auto EDA + Significance Tests + Clustering).\n"
+    appendix += "- Các thuật toán: ANOVA, Chi2-test, Isolation Forest, K-Means, VIF.\n"
+    appendix += "- Báo cáo này được tạo tự động nhưng có thể được mở rộng thủ công bởi Data Analyst.\n"
+    sections.append(appendix)
+
+    return "\n\n".join(sections)
+
 def extract_eda_insights(result: dict) -> list:
     """
-    Automatically extract insights from EDA results.
-    Input: result (dict) — output from the full AutoEDA pipeline.
-    Output: list[str] — list of insights in text format.
+    Automatically extract actionable, business-friendly insights from EDA results.
+    Every insight is data-driven — NO hallucination, NO NLP generation.
+    Each insight answers: What? → So what? → Now what?
     """
     insights = []
 
@@ -957,24 +1371,40 @@ def extract_eda_insights(result: dict) -> list:
     top_missing = missing_summary.get("top_missing_columns", {})
     for col, pct in top_missing.items():
         if pct > 0.3:  # >30%
-            insights.append(f"❗ Column '{col}' has a high missing rate ({pct*100:.1f}%) → consider dropping or imputing.")
+            insights.append(
+                f"❗ Column '{col}' has {pct*100:.1f}% missing values → "
+                f"this affects the reliability of the analysis. "
+                f"→ Recommended: (1) Drop the column if not important, or (2) Impute using median/mode if it's a predictive variable."
+            )
 
     # --- 2. Duplicate rows ---
     duplicates = result.get("inspection", {}).get("duplicates", {})
     dup_count = duplicates.get("duplicate_count", 0)
     if dup_count > 0:
-        insights.append(f"🔁 Detected {dup_count} duplicate rows → should be checked and handled.")
+        insights.append(
+            f"🔁 Detected {dup_count} duplicate rows → "
+            f"could be due to data entry errors or multiple system records. "
+            f"→ Action: check and remove to avoid biasing statistics (e.g., duplicated revenue)."
+        )
 
     # --- 3. Constant columns ---
     columns = result.get("inspection", {}).get("columns", {})
     for col, col_info in columns.items():
         if col_info.get("is_constant", False):
-            insights.append(f"📌 Column '{col}' is constant (only one unique value) → can be removed.")
+            insights.append(
+                f"📌 Column '{col}' contains only one unique value → "
+                f"provides no information for analysis or modeling. "
+                f"→ Recommended to drop to reduce noise and save processing resources."
+            )
 
     # --- 4. High cardinality categorical ---
     for col, col_info in columns.items():
         if col_info.get("inferred_type") in ["categorical", "text"] and col_info.get("unique_percent", 0) > 0.9 and col_info.get("unique_count", 0) > 50:
-            insights.append(f"🔢 Column '{col}' has very high cardinality ({col_info.get('unique_count')} unique values) → may represent an ID, should be handled specially.")
+            insights.append(
+                f"🔢 Column '{col}' has {col_info.get('unique_count')} unique values (>90% of total) → "
+                f"likely an ID, customer name, or transaction code. "
+                f"→ Should not be used directly in classification models — consider hashing, embeddings, or dropping if not needed."
+            )
 
     # --- 5. Numeric insights: skew, outliers ---
     descriptive = result.get("descriptive", {})
@@ -983,13 +1413,21 @@ def extract_eda_insights(result: dict) -> list:
         skew_val = stats.get("skew", 0)
         if abs(skew_val) > 1:
             direction = "right" if skew_val > 0 else "left"
-            insights.append(f"📈 Variable '{col}' is skewed to the {direction} (skew = {skew_val:.2f}) → consider transformation (log, box-cox).")
+            insights.append(
+                f"📈 Variable '{col}' is {direction}-skewed (skew = {skew_val:.2f}) → "
+                f"distribution is imbalanced, most values cluster on one side. "
+                f"→ Consider log/square-root transformation to improve model accuracy."
+            )
 
         outliers = stats.get("outliers", 0)
         total = stats.get("count", 1)
         outlier_pct = outliers / total * 100
         if outlier_pct > 5:
-            insights.append(f"⚠️ Variable '{col}' has {outliers} outliers ({outlier_pct:.1f}%) → investigate cause or handle accordingly.")
+            insights.append(
+                f"⚠️ Variable '{col}' has {outliers} outliers ({outlier_pct:.1f}%) → "
+                f"could be data entry errors, special events (promotions, system glitches), or fraud. "
+                f"→ Action: investigate cause — if error → fix/remove; if real → keep and handle separately (e.g., anomaly analysis)."
+            )
 
     # --- 6. Imbalanced categorical ---
     categorical_stats = descriptive.get("categorical", {})
@@ -998,13 +1436,19 @@ def extract_eda_insights(result: dict) -> list:
         if top_values:
             top_val = top_values[0]
             if top_val.get("percent", 0) > 80:
-                insights.append(f"⚖️ Column '{col}' is highly imbalanced: '{top_val['value']}' accounts for {top_val['percent']}% → may bias the model.")
+                insights.append(
+                    f"⚖️ Column '{col}' is highly imbalanced: value '{top_val['value']}' accounts for {top_val['percent']}% → "
+                    f"machine learning models may be biased toward this group, reducing accuracy for minority classes. "
+                    f"→ Recommended: rebalance using oversampling, undersampling, or class weights."
+                )
 
     # --- 7. Suggested actions from inspection ---
     for col, col_info in columns.items():
         suggestions = col_info.get("suggested_actions", [])
         for suggestion in suggestions:
-            insights.append(f"💡 Suggestion for column '{col}': {suggestion}")
+            full_suggestion = f"💡 Suggestion for column '{col}': {suggestion}"
+            if full_suggestion not in insights:
+                insights.append(full_suggestion)
 
     # --- 8. ANOVA & Chi-square significance ---
     advanced = result.get("advanced", {})
@@ -1024,7 +1468,21 @@ def extract_eda_insights(result: dict) -> list:
                 effect = "medium"
             elif eta2 >= 0.01:
                 effect = "small"
-            insights.append(f"✅ ANOVA: Categorical variable '{cat}' significantly affects '{num}' (p={p_val:.3f}, η²={eta2:.3f} → {effect} effect size).")
+
+            # Insight chuyên môn
+            insights.append(
+                f"✅ ANOVA: Categorical variable '{cat}' significantly impacts '{num}' "
+                f"(p={p_val:.3f}, η²={eta2:.3f} → effect size {effect}). "
+                f"→ Interpretation: the mean of '{num}' differs significantly across groups in '{cat}'. "
+                f"→ Consider '{cat}' as an important predictor in modeling."
+            )
+
+            # Insight dễ hiểu cho non-IT / business
+            insights.append(
+                f"📊 Business meaning: '{cat}' clearly affects '{num}'. "
+                f"Nói cách khác, giá trị trung bình của '{num}' thay đổi đáng kể theo từng nhóm trong '{cat}'. "
+                f"→ Với doanh nghiệp: khi thay đổi '{cat}', bạn có thể kỳ vọng '{num}' cũng thay đổi theo."
+            )
 
     # Chi-square
     chi2_results = significance.get("chi2", {})
@@ -1040,16 +1498,63 @@ def extract_eda_insights(result: dict) -> list:
                 strength = "moderate to strong"
             elif cramers_v >= 0.1:
                 strength = "weak to moderate"
-            insights.append(f"✅ Chi-square: Significant relationship between '{col1}' and '{col2}' (p={p_val:.3f}, V={cramers_v:.3f} → {strength} association).")
+
+            # Insight chuyên môn
+            insights.append(
+                f"✅ Chi-square test: Significant relationship between '{col1}' and '{col2}' "
+                f"(p={p_val:.3f}, V={cramers_v:.3f} → strength {strength}). "
+                f"→ Interpretation: distribution of '{col1}' changes depending on '{col2}' — one may predict the other. "
+                f"→ Modeling note: consider keeping only one if they are redundant."
+            )
+
+            # Insight dễ hiểu cho non-IT / business
+            insights.append(
+                f"📊 Business meaning: '{col1}' có mối quan hệ chặt chẽ với '{col2}' "
+                f"(mức độ {strength}). "
+                f"→ Với doanh nghiệp: khi biết '{col2}', bạn có thể dự đoán hoặc giải thích xu hướng của '{col1}', "
+                
+                f"và ngược lại. Ví dụ: nếu '{col2}' là vùng miền và '{col1}' là sản phẩm, thì nhu cầu sản phẩm khác nhau theo vùng."
+            )
 
     # --- 9. Clustering quality ---
     clustering = advanced.get("clustering", {})
     sil_score = clustering.get("silhouette_score")
+    labels = clustering.get("labels", [])
+    centroids = clustering.get("centroids", {})
+    sizes = clustering.get("sizes", {})
+
     if sil_score is not None:
         if sil_score > 0.5:
-            insights.append(f"🎯 Data can be well clustered (silhouette score = {sil_score:.3f}) → consider KMeans or cluster analysis.")
+            insights.append(
+                f"🎯 The data has a clear clustering structure (silhouette score = {sil_score:.3f}) → "
+                f"the groups are well separated. "
+                f"→ The clustering result shows {len(centroids)} main clusters."
+            )
+
+            # Detailed description of each cluster
+            for cluster_id, features in enumerate(centroids):
+                size = sizes.get(cluster_id, 0)
+                feature_desc = ", ".join(
+                    f"{k} ≈ {v:.2f}" if isinstance(v, (int, float)) else f"{k} = {v}"
+                    for k, v in features.items()
+                )
+                insights.append(
+                    f"🔹 Cluster {cluster_id}: contains {size} data points. Average characteristics: {feature_desc}."
+                )
+
+            insights.append(
+                "→ The above clusters reflect clear differences in data characteristics. "
+                "They can be used for descriptive analysis, segmentation, or as features for modeling."
+            )
+
         elif sil_score < 0.2:
-            insights.append(f"📉 Data is difficult to cluster (silhouette score = {sil_score:.3f}) → may lack clear cluster structure.")
+            insights.append(
+                f"📉 The data is difficult to cluster (silhouette score = {sil_score:.3f}) → "
+                f"the data points do not form clear groups. "
+                f"→ This may be due to a lack of suitable features, or because the data is too homogeneous. "
+                f"→ Consider engineering additional features or not using clustering in this case."
+            )
+
 
     # --- 10. Anomalies (Isolation Forest) ---
     patterns = advanced.get("patterns", {})
@@ -1059,7 +1564,11 @@ def extract_eda_insights(result: dict) -> list:
         n_outliers = sum(1 for x in outlier_flags if x == -1)
         pct_outliers = n_outliers / len(outlier_flags) * 100
         if n_outliers > 0:
-            insights.append(f"🚨 Detected {n_outliers} anomalies ({pct_outliers:.1f}%) using Isolation Forest → investigate potential fraud or data entry errors.")
+            insights.append(
+                f"🚨 Detected {n_outliers} anomalies ({pct_outliers:.1f}%) using Isolation Forest → "
+                f"these points differ strongly from the rest of the data. "
+                f"→ Action: investigate — could be fraud, system errors, or rare events. If error → remove; if real → analyze separately."
+            )
 
     # --- 11. Multicollinearity (VIF) ---
     redundancy = advanced.get("redundancy", {})
@@ -1073,8 +1582,12 @@ def extract_eda_insights(result: dict) -> list:
     shape = result.get("inspection", {}).get("shape", {})
     total_rows = shape.get("rows", 0)
     if total_rows < 50:
-        insights.append(f"📉 Dataset is too small (only {total_rows} rows) → statistical results may not be reliable.")
-
+        insights.append(
+            f"📉 Dataset is too small ({total_rows} rows) → "
+            f"statistical tests (significance, clustering, prediction) may be unreliable due to high sampling error. "
+            f"→ Recommended: collect more data before making strategic decisions or training models."
+        )
+    
     # Remove duplicates and return
     return list(dict.fromkeys(insights))
 
@@ -1149,6 +1662,12 @@ async def parse_file(file: UploadFile = File(...)):
 
     # ✅ THÊM insights VÀO result
     result["insights"] = insights
+    
+    business_report = generate_business_report(result)
+
+    result["business_report"] = business_report
+
+    
     # ✅ In sau khi đã có result
     print("All columns:", df.columns.tolist())
     print("Numeric cols:", list(descriptive["numeric"].keys()))
