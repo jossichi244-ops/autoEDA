@@ -1783,7 +1783,6 @@ async def read_file_to_df(file: UploadFile) -> pd.DataFrame:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading file: {e}")
 
-
 def detect_data_types(df: pd.DataFrame, detection_config: Dict[str, Any]) -> Dict[str, str]:
     detected = {}
 
@@ -1824,17 +1823,20 @@ def detect_data_types(df: pd.DataFrame, detection_config: Dict[str, Any]) -> Dic
 
     return detected
 
-
-def preprocess_data(df: pd.DataFrame, detected_types: Dict[str, str], preprocessing_config: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def preprocess_data(
+    df: pd.DataFrame, 
+    detected_types: Dict[str, str], 
+    preprocessing_config: Dict[str, Any]
+) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, str]]:
     import numpy as np
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import StandardScaler, RobustScaler, QuantileTransformer, OneHotEncoder
 
     df_processed = df.copy()
     log = {}
+    updated_types = detected_types.copy()
 
-    for col, dtype in detected_types.items():
-
+    for col, dtype in list(detected_types.items()):
         log[col] = []
 
         if dtype == "numeric":
@@ -1862,7 +1864,10 @@ def preprocess_data(df: pd.DataFrame, detected_types: Dict[str, str], preprocess
 
         elif dtype == "categorical":
             imp_strategy = preprocessing_config["categorical"]["imputer"][0]
-            imputer = SimpleImputer(strategy=imp_strategy, fill_value="missing" if imp_strategy == "missing_category" else None)
+            imputer = SimpleImputer(
+                strategy=imp_strategy, 
+                fill_value="missing" if imp_strategy == "missing_category" else None
+            )
             df_processed[[col]] = imputer.fit_transform(df_processed[[col]])
             log[col].append(f"imputer: {imp_strategy}")
 
@@ -1872,13 +1877,19 @@ def preprocess_data(df: pd.DataFrame, detected_types: Dict[str, str], preprocess
                 encoded = encoder.fit_transform(df_processed[[col]])
                 cols_encoded = [f"{col}__{cat}" for cat in encoder.categories_[0]]
                 df_encoded = pd.DataFrame(encoded, columns=cols_encoded, index=df_processed.index)
+
+                # Drop cột gốc, thêm cột mới
                 df_processed = pd.concat([df_processed.drop(columns=[col]), df_encoded], axis=1)
                 log[col].append("encoding: OneHotEncoder")
+
+                # ✅ Update detected_types: xóa cột gốc, thêm cột mới
+                updated_types.pop(col, None)
+                for new_col in cols_encoded:
+                    updated_types[new_col] = "categorical"
             else:
                 log[col].append(f"encoding: {encoding_method} (not implemented)")
 
         elif dtype == "text":
-
             if "lowercase" in preprocessing_config["text"]["cleaning"]:
                 df_processed[col] = df_processed[col].astype(str).str.lower()
                 log[col].append("cleaning: lowercase")
@@ -1886,17 +1897,198 @@ def preprocess_data(df: pd.DataFrame, detected_types: Dict[str, str], preprocess
         elif dtype == "time_series":
             log[col].append("time_series: no preprocessing applied")
 
-    return df_processed, log
+    return df_processed, log, updated_types
 
 async def predict_from_df(df: pd.DataFrame):
     print("Received data for prediction")
     detected_types = detect_data_types(df, pipeline_config["data_type_detection"])
-    df_processed, preprocessing_log = preprocess_data(df, detected_types, pipeline_config["preprocessing"])
+
+    df_processed, preprocessing_log, updated_types = preprocess_data(
+        df, detected_types, pipeline_config["preprocessing"]
+    )
+
+    # Feature engineering
+    df_fe, fe_log = feature_engineering(df_processed, updated_types, pipeline_config["feature_engineering"])
+    
+    # Feature selection
+    df_fs, fs_log = feature_selection(
+    df_fe, 
+    updated_types, 
+    pipeline_config["feature_selection"], 
+    target_col=None  
+)
+
+    
     return {
-        "detected_types": detected_types,
+        "detected_types": updated_types,  
         "preprocessing_log": preprocessing_log,
-        "processed_data_preview": df_processed.head(5).to_dict(orient="records"),
+        "feature_engineering_log": fe_log,
+        "feature_selection_log": fs_log,
+        "processed_data_preview": df_fs.head(5).to_dict(orient="records"),
     }
+
+def feature_engineering(
+    df: pd.DataFrame,
+    detected_types: Dict[str, str],
+    fe_config: Dict[str, Any]
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+
+    from sklearn.preprocessing import PolynomialFeatures
+    import numpy as np
+
+    df_fe = df.copy()
+    log = {}
+
+    n_numeric = sum(1 for t in detected_types.values() if t == "numeric")
+    n_categorical = sum(1 for t in detected_types.values() if t == "categorical")
+    avg_tokens = 0
+    if any(t == "text" for t in detected_types.values()):
+        text_cols = [c for c, t in detected_types.items() if t == "text"]
+        samples = df[text_cols].astype(str).apply(lambda x: x.str.split().map(len))
+        avg_tokens = samples.mean().mean()
+
+    # Numeric feature engineering
+    if n_numeric >= 2 and "numeric" in fe_config:
+        log["numeric"] = []
+        strategies = fe_config["numeric"]["strategies"]
+        num_cols = [c for c, t in detected_types.items() if t == "numeric"]
+
+        if "interaction_terms" in strategies:
+            for i, c1 in enumerate(num_cols):
+                for c2 in num_cols[i+1:]:
+                    new_col = f"{c1}_x_{c2}"
+                    df_fe[new_col] = df_fe[c1] * df_fe[c2]
+                    log["numeric"].append(f"Created interaction {new_col}")
+
+        if any(s.startswith("polynomial_degree") for s in strategies):
+            degree = max(int(s.split("=")[1]) for s in strategies if s.startswith("polynomial_degree"))
+            poly = PolynomialFeatures(degree=degree, include_bias=False)
+            poly_features = poly.fit_transform(df_fe[num_cols])
+            poly_names = poly.get_feature_names_out(num_cols)
+            poly_df = pd.DataFrame(poly_features, columns=poly_names, index=df_fe.index)
+            df_fe = pd.concat([df_fe, poly_df], axis=1)
+            log["numeric"].append(f"Applied PolynomialFeatures degree={degree}")
+
+    # Categorical feature engineering
+    if n_categorical >= 2 and "categorical" in fe_config:
+        log["categorical"] = []
+        cat_cols = [c for c, t in detected_types.items() if t == "categorical"]
+        if "cross_features" in fe_config["categorical"]["strategies"]:
+            for i, c1 in enumerate(cat_cols):
+                for c2 in cat_cols[i+1:]:
+                    new_col = f"{c1}_x_{c2}"
+                    df_fe[new_col] = df_fe[c1].astype(str) + "_" + df_fe[c2].astype(str)
+                    log["categorical"].append(f"Created cross feature {new_col}")
+
+    # Text feature engineering (placeholder)
+    if avg_tokens > 5 and "text" in fe_config:
+        log["text"] = []
+        strategies = fe_config["text"]["strategies"]
+        for s in strategies:
+            log["text"].append(f"Applied {s} (not implemented in backend demo)")
+
+    # Time series feature engineering (placeholder)
+    if "time_series" in fe_config:
+        ts_cols = [c for c, t in detected_types.items() if t == "time_series"]
+        if ts_cols:
+            log["time_series"] = []
+            for s in fe_config["time_series"]["strategies"]:
+                log["time_series"].append(f"Applied {s} on {ts_cols} (not implemented in backend demo)")
+
+    return df_fe, log
+
+def feature_selection(
+    df: pd.DataFrame,
+    detected_types: Dict[str, str],
+    fs_config: Dict[str, Any],
+    target_col: str = None   
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    from sklearn.feature_selection import VarianceThreshold
+    from sklearn.decomposition import PCA
+    from sklearn.linear_model import LassoCV
+
+    df_fs = df.copy()
+    log = {}
+
+    # Numeric feature selection
+    num_cols = [c for c, t in detected_types.items() if t == "numeric" and c in df_fs.columns]
+    
+    if num_cols and "numeric" in fs_config:
+        log["numeric"] = []
+
+        # Variance Threshold
+        if "variance_threshold" in fs_config["numeric"]:
+            sel = VarianceThreshold(threshold=0.0)
+            sel.fit(df_fs[num_cols])
+
+            support_mask = sel.get_support()
+            kept = [col for col, keep in zip(num_cols, support_mask) if keep]
+            dropped = [col for col, keep in zip(num_cols, support_mask) if not keep]
+
+            df_fs = pd.concat([df_fs[kept], df_fs.drop(columns=num_cols)], axis=1)
+            log["numeric"].append({
+                "method": "variance_threshold",
+                "kept": kept,
+                "dropped": dropped,
+                "explanation": "Dropped features with zero variance (no information)."
+            })
+
+        # PCA
+        if "pca" in fs_config["numeric"] and len(num_cols) > 1:
+            pca = PCA(n_components=min(5, len(num_cols)))
+            components = pca.fit_transform(df_fs[num_cols])
+            for i in range(components.shape[1]):
+                df_fs[f"pca_comp_{i+1}"] = components[:, i]
+
+            log["numeric"].append({
+                "method": "pca",
+                "original_features": num_cols,
+                "components_added": [f"pca_comp_{i+1}" for i in range(components.shape[1])],
+                "explained_variance_ratio": pca.explained_variance_ratio_.tolist(),
+                "explanation": "PCA reduces dimensionality by projecting onto top components."
+            })
+
+        # Lasso (chỉ chạy nếu có target)
+        if "lasso" in fs_config["numeric"]:
+            if target_col and target_col in df_fs.columns:
+                try:
+                    X = df_fs[num_cols]
+                    y = df_fs[target_col]
+                    lasso = LassoCV(cv=5)
+                    lasso.fit(X, y)
+                    selected_features = [num_cols[i] for i, coef in enumerate(lasso.coef_) if coef != 0]
+
+                    log["numeric"].append({
+                        "method": "lasso",
+                        "selected_features": selected_features,
+                        "explanation": "Lasso selected features with strongest predictive signal."
+                    })
+                except Exception as e:
+                    log["numeric"].append({
+                        "method": "lasso",
+                        "error": str(e),
+                        "explanation": "Lasso skipped due to error."
+                    })
+            else:
+                log["numeric"].append({
+                    "method": "lasso",
+                    "selected_features": [],
+                    "explanation": "Skipped because no target variable was provided."
+                })
+
+    # Categorical
+    if "categorical" in fs_config:
+        log["categorical"] = ["chi2 (placeholder)", "mutual_info (placeholder)"]
+
+    # Text
+    if "text" in fs_config:
+        log["text"] = ["tfidf_feature_importance (placeholder)", "embedding_dim_reduction (placeholder)"]
+
+    # Time series
+    if "time_series" in fs_config:
+        log["time_series"] = ["autocorrelation_selection (placeholder)", "feature_importance (placeholder)"]
+
+    return df_fs, log
 
 @app.post("/api/prediction")
 async def run_prediction(file: UploadFile = File(...)):

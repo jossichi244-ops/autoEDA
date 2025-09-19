@@ -75,5 +75,346 @@
     "categorical": ["chi2", "mutual_info"],
     "text": ["tfidf_feature_importance", "embedding_dim_reduction"],
     "time_series": ["autocorrelation_selection", "feature_importance"]
+  },
+
+  "model_selection": {
+    "problem_type": {
+      "regression": [
+        "LinearRegression",
+        "Ridge",
+        "Lasso",
+        "RandomForestRegressor",
+        "XGBRegressor",
+        "LGBMRegressor",
+        "SVR"
+      ],
+      "classification": [
+        "LogisticRegression",
+        "SVC",
+        "DecisionTreeClassifier",
+        "RandomForestClassifier",
+        "XGBClassifier",
+        "LGBMClassifier",
+        "MLPClassifier"
+      ],
+      "time_series": [
+        "ARIMA",
+        "SARIMA",
+        "Prophet",
+        "LSTM",
+        "GRU",
+        "XGBRegressor (with lag features)"
+      ],
+      "clustering": ["KMeans", "DBSCAN", "GaussianMixture"]
+    },
+    "ensemble_strategies": ["bagging", "boosting", "stacking", "voting"],
+    "deep_learning": {
+      "enabled": false,
+      "architectures": ["MLP", "CNN", "RNN", "LSTM", "Transformer"],
+      "frameworks": ["TensorFlow", "PyTorch", "Keras"]
+    },
+    "selection_criteria": [
+      "accuracy",
+      "f1_score",
+      "auc_roc",
+      "rmse",
+      "mape",
+      "silhouette_score"
+    ],
+    "auto_select": {
+      "enabled": true,
+      "strategy": "performance_first",
+      "justification": {
+        "rules": [
+          {
+            "condition": "problem_type == 'regression' and n_features < 10 and dataset_size < 1000",
+            "selected_models": ["LinearRegression", "Ridge", "Lasso"],
+            "justification": "Dữ liệu nhỏ và số chiều thấp → Ưu tiên mô hình tuyến tính đơn giản, dễ giải thích và ít overfit."
+          },
+          {
+            "condition": "problem_type == 'regression' and n_features > 50 and dataset_size > 10000",
+            "selected_models": [
+              "XGBRegressor",
+              "LGBMRegressor",
+              "RandomForestRegressor"
+            ],
+            "justification": "Dữ liệu lớn và nhiều chiều → Ưu tiên mô hình ensemble mạnh (XGBoost, LightGBM) để xử lý tốt độ phức tạp và tương tác giữa các features."
+          },
+          {
+            "condition": "problem_type == 'classification' and has_imbalanced_target == true",
+            "selected_models": [
+              "XGBClassifier",
+              "LGBMClassifier",
+              "RandomForestClassifier"
+            ],
+            "justification": "Dữ liệu mất cân bằng → Ưu tiên mô hình tree-based (XGBoost, Random Forest) vì chúng xử lý tốt imbalance thông qua trọng số lớp hoặc sampling."
+          },
+          {
+            "condition": "problem_type == 'classification' and interpretability_required == true",
+            "selected_models": ["LogisticRegression", "DecisionTreeClassifier"],
+            "justification": "Yêu cầu giải thích mô hình → Ưu tiên Logistic Regression hoặc Decision Tree vì chúng cung cấp hệ số hoặc quy tắc rõ ràng."
+          },
+          {
+            "condition": "problem_type == 'time_series' and has_seasonality == true",
+            "selected_models": ["SARIMA", "Prophet"],
+            "justification": "Dữ liệu có tính mùa vụ rõ ràng → Ưu tiên mô hình thống kê truyền thống (SARIMA, Prophet) vì chúng được thiết kế đặc biệt để mô hình hóa xu hướng và mùa vụ."
+          },
+          {
+            "condition": "problem_type == 'time_series' and dataset_size > 5000 and has_lag_features == true",
+            "selected_models": ["XGBRegressor (with lag features)", "LSTM"],
+            "justification": "Dữ liệu chuỗi thời gian lớn và đã được chuyển thành features dạng bảng → Có thể sử dụng mô hình học máy mạnh (XGBoost) hoặc học sâu (LSTM) để nắm bắt các mối quan hệ phi tuyến phức tạp."
+          },
+          {
+            "condition": "problem_type == 'clustering' and n_features < 5",
+            "selected_models": ["KMeans"],
+            "justification": "Số chiều thấp → KMeans hoạt động hiệu quả và nhanh chóng, phù hợp cho phân cụm ban đầu."
+          },
+          {
+            "condition": "problem_type == 'clustering' and has_arbitrary_shapes == true",
+            "selected_models": ["DBSCAN"],
+            "justification": "Dữ liệu có cụm hình dạng bất thường → DBSCAN phù hợp vì nó không giả định cụm có hình cầu như KMeans."
+          },
+          {
+            "condition": "contains_text_features == true and deep_learning.enabled == true",
+            "selected_models": ["LSTM", "Transformer"],
+            "justification": "Dữ liệu có chứa văn bản → Ưu tiên mô hình học sâu (LSTM, Transformer) vì chúng có khả năng trích xuất đặc trưng ngữ nghĩa sâu từ văn bản."
+          },
+          {
+            "condition": "contains_categorical_features == true and n_unique_categories > 100",
+            "selected_models": ["CatBoost", "LightGBM"],
+            "justification": "Có biến phân loại với cardinality cao → Ưu tiên LightGBM hoặc CatBoost vì chúng xử lý tốt biến categorical mà không cần one-hot encoding."
+          }
+        ],
+        "fallback": {
+          "selected_models": [
+            "RandomForestClassifier",
+            "RandomForestRegressor"
+          ],
+          "justification": "Không có điều kiện nào khớp → Sử dụng Random Forest làm mô hình mặc định vì nó mạnh mẽ, linh hoạt và hoạt động tốt trên nhiều loại dữ liệu."
+        }
+      }
+    }
+  },
+
+  "model_training": {
+    "train_test_split": {
+      "strategy": "random",
+      "test_size": 0.2,
+      "stratify": true,
+      "random_state": 42
+    },
+    "cross_validation": {
+      "enabled": true,
+      "method": "k_fold",
+      "n_splits": 5,
+      "scoring": "auto"
+    },
+    "hyperparameter_tuning": {
+      "enabled": true,
+      "phases": [
+        {
+          "name": "research_phase",
+          "description": "Statistical-guided Bayesian Optimization using Gaussian Process (scikit-optimize) for probabilistic rigor.",
+          "tool": "scikit-optimize",
+          "n_iter": 30,
+          "cv_folds": 3,
+          "scoring": "auto",
+          "acquisition_function": "EI",
+          "gp_kernel": "Matern",
+          "noise": "gaussian",
+          "early_stopping": false,
+          "goal": "explore promising regions and estimate uncertainty"
+        },
+        {
+          "name": "production_phase",
+          "description": "Optuna for scalable, pruned, GPU-friendly fine-tuning in narrowed search space.",
+          "tool": "optuna",
+          "n_iter": 70,
+          "cv_folds": 5,
+          "scoring": "auto",
+          "pruner": "MedianPruner",
+          "sampler": "TPESampler",
+          "use_gpu": true,
+          "early_stopping": true,
+          "timeout_minutes": 30,
+          "goal": "exploit best regions found in research phase for maximum performance"
+        }
+      ],
+      "statistical_guided_search": {
+        "enabled": true,
+        "strategy": "data_driven",
+        "rules": {
+          "RandomForestClassifier": {
+            "n_estimators": {
+              "formula": "min(200, max(50, n_samples // 10))",
+              "description": "Số cây: tỷ lệ thuận với số mẫu, giới hạn max 200 để tránh overfit."
+            },
+            "max_depth": {
+              "formula": "min(15, max(3, log2(n_features) * 2))",
+              "description": "Độ sâu cây: tỷ lệ với log số chiều, tránh cây quá sâu gây overfit trên dữ liệu nhỏ."
+            }
+          },
+          "XGBClassifier": {
+            "learning_rate": {
+              "formula": "0.05 if n_samples > 10000 else 0.1",
+              "description": "Tốc độ học: dữ liệu lớn → learning_rate nhỏ để hội tụ mịn."
+            }
+          }
+        }
+      }
+    },
+    "training_config": {
+      "max_runtime_minutes": 60,
+      "use_gpu": true,
+      "verbose": true,
+      "final_fit_on_full_data": true
+    }
+  },
+  "model_evaluation": {
+    "metrics": {
+      "classification": [
+        "accuracy",
+        "precision",
+        "recall",
+        "f1_score",
+        "roc_auc",
+        "confusion_matrix",
+        "precision_recall_auc",
+        "log_loss"
+      ],
+      "regression": [
+        "mae",
+        "mse",
+        "rmse",
+        "r2_score",
+        "mape",
+        "rmsle",
+        "max_error"
+      ],
+      "time_series": ["mae", "mse", "rmse", "mape", "smape", "mase", "mae_cv"],
+      "clustering": [
+        "silhouette_score",
+        "davies_bouldin_index",
+        "calinski_harabasz_score",
+        "adjusted_rand_score"
+      ]
+    },
+    "validation_strategy": "cross_validation",
+    "threshold_metrics": {
+      "min_accuracy": 0.7,
+      "max_rmse": "auto",
+      "min_auc": 0.8,
+      "min_f1": 0.65
+    },
+    "advanced_evaluation": {
+      "bias_variance_analysis": true,
+      "learning_curves": true,
+      "calibration_curves": true,
+      "residual_analysis": true,
+      "probabilistic_uncertainty": {
+        "enabled": true,
+        "method": "gaussian_process_regression",
+        "confidence_interval": 0.95,
+        "description": "Ước lượng khoảng tin cậy cho dự đoán, dựa trên posterior distribution từ Bayesian Optimization."
+      }
+    },
+    "model_comparison": {
+      "enabled": true,
+      "strategy": "statistical_significance_test",
+      "test": "wilcoxon_signed_rank_test",
+      "alpha": 0.05,
+      "description": "So sánh hiệu năng giữa các mô hình/cấu hình để chọn ra mô hình tốt nhất một cách thống kê."
+    }
+  },
+  "model_interpretation": {
+    "enabled": true,
+    "methods": {
+      "global": [
+        "feature_importance",
+        "permutation_importance",
+        "partial_dependence_plots"
+      ],
+      "local": ["shap", "lime"],
+      "surrogate_models": ["decision_tree_surrogate", "linear_model_surrogate"]
+    },
+    "output_format": ["plots", "tables", "interactive_dashboards"],
+    "target_audience": ["technical", "business_stakeholders"]
+  },
+  "model_improvement": {
+    "strategies": [
+      "ensemble_learning",
+      "hyperparameter_fine_tuning",
+      "advanced_feature_engineering",
+      "collect_more_data",
+      "retrain_with_updated_data",
+      "model_stacking",
+      "error_analysis_and_correction"
+    ],
+    "automated": true,
+    "max_iterations": 3,
+    "improvement_threshold": 0.02
+  },
+  "model_deployment": {
+    "target_environment": ["cloud", "on_premise", "edge"],
+    "platforms": [
+      "AWS SageMaker",
+      "GCP AI Platform",
+      "Azure ML",
+      "Docker",
+      "Kubernetes",
+      "FastAPI"
+    ],
+    "serialization_format": ["pickle", "joblib", "onnx", "pmml"],
+    "api_spec": {
+      "framework": "FastAPI",
+      "input_schema": "auto_generated_from_training_data",
+      "output_schema": "prediction + confidence_score"
+    },
+    "monitoring": {
+      "enabled": true,
+      "metrics": [
+        "prediction_drift",
+        "data_drift",
+        "model_performance_decay",
+        "latency",
+        "throughput"
+      ],
+      "alerting": ["email", "slack", "pagerduty"],
+      "retraining_trigger": [
+        "performance_drop > 5%",
+        "data_drift_detected",
+        "scheduled (monthly)"
+      ]
+    }
+  },
+  "communication_documentation": {
+    "auto_generate": true,
+    "sections": [
+      "executive_summary",
+      "data_understanding",
+      "preprocessing_steps",
+      "feature_engineering",
+      "model_selection_justification",
+      "hyperparameter_tuning_results",
+      "evaluation_metrics",
+      "model_interpretation_insights",
+      "deployment_architecture",
+      "monitoring_plan",
+      "limitations_and_future_work"
+    ],
+    "output_formats": [
+      "PDF_report",
+      "HTML_dashboard",
+      "PowerPoint_slides",
+      "Markdown"
+    ],
+    "audience": [
+      "data_scientists",
+      "engineers",
+      "business_leaders",
+      "stakeholders"
+    ],
+    "visualization": true,
+    "include_code_snippets": false
   }
 }
