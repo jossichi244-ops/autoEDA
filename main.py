@@ -1704,8 +1704,9 @@ async def parse_file(file: UploadFile = File(...)):
 
     advanced = generate_advanced_eda(df)
 
-
-    
+    print("parse_file: Sending data to run_prediction for forecasting")
+    prediction_result = await predict_from_df(df)
+    print("parse_file: Received prediction result")
     result = {
         "schema": schema,
         "preview": preview,
@@ -1723,6 +1724,7 @@ async def parse_file(file: UploadFile = File(...)):
             "sampled": file_size_mb > 10 
         }
     }
+
     insights = extract_eda_insights(result)
 
     # ✅ THÊM insights VÀO result
@@ -1732,7 +1734,6 @@ async def parse_file(file: UploadFile = File(...)):
 
     result["business_report"] = business_report
 
-    
     # ✅ In sau khi đã có result
     print("All columns:", df.columns.tolist())
     print("Numeric cols:", list(descriptive["numeric"].keys()))
@@ -1741,7 +1742,7 @@ async def parse_file(file: UploadFile = File(...)):
     for col in list(descriptive["categorical"].keys()):
         print(f"  {col}: {df[col].nunique()} unique values")
     cleaned = convert_numpy_types(result)
-
+    cleaned["prediction_result"] = prediction_result
     return JSONResponse(
         content=cleaned,
         media_type="application/json"
@@ -1755,3 +1756,151 @@ def health():
         "uptime": "unknown", 
         "memory_usage_mb": "not tracked"
     }
+
+#============================================================
+from fastapi import FastAPI, UploadFile, File, HTTPException
+import pandas as pd
+from io import BytesIO
+import json
+from typing import Tuple, Dict, Any
+
+# Load pipeline config 1 lần khi app start
+with open("pipelineAutoML.json", "r") as f:
+    pipeline_config = json.load(f)
+
+async def read_file_to_df(file: UploadFile) -> pd.DataFrame:
+    content = await file.read()
+    name = file.filename.lower()
+    try:
+        if name.endswith(".csv"):
+            return pd.read_csv(BytesIO(content))
+        elif name.endswith(".json"):
+            return pd.read_json(BytesIO(content))
+        elif name.endswith((".xlsx", ".xls")):
+            return pd.read_excel(BytesIO(content))
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file type")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading file: {e}")
+
+
+def detect_data_types(df: pd.DataFrame, detection_config: Dict[str, Any]) -> Dict[str, str]:
+    detected = {}
+
+    for col in df.columns:
+        col_dtype = df[col].dtype
+
+        # Time series detection
+        if detection_config["time_series"]["enabled"]:
+            # criteria: datetime index or ordered timestamps
+            if pd.api.types.is_datetime64_any_dtype(col_dtype):
+                detected[col] = "time_series"
+                continue
+
+        # Numeric detection
+        if detection_config["numeric"]["enabled"]:
+            if col_dtype.name in detection_config["numeric"]["criteria"]:
+                detected[col] = "numeric"
+                continue
+
+        # Categorical detection
+        if detection_config["categorical"]["enabled"]:
+            if col_dtype.name in detection_config["categorical"]["criteria"]:
+                detected[col] = "categorical"
+                continue
+
+        # Text detection
+        if detection_config["text"]["enabled"]:
+            # check long string + avg tokens > 5
+            sample_vals = df[col].dropna().astype(str).sample(min(100, len(df[col])), random_state=42)
+            avg_len = sample_vals.str.len().mean()
+            avg_tokens = sample_vals.str.split().map(len).mean()
+            if avg_len > 50 and avg_tokens > 5:
+                detected[col] = "text"
+                continue
+
+        # Mặc định categorical
+        detected[col] = "categorical"
+
+    return detected
+
+
+def preprocess_data(df: pd.DataFrame, detected_types: Dict[str, str], preprocessing_config: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    import numpy as np
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler, RobustScaler, QuantileTransformer, OneHotEncoder
+
+    df_processed = df.copy()
+    log = {}
+
+    for col, dtype in detected_types.items():
+
+        log[col] = []
+
+        if dtype == "numeric":
+            imp_strategy = preprocessing_config["numeric"]["imputer"][0] 
+            imputer = SimpleImputer(strategy=imp_strategy)
+            df_processed[[col]] = imputer.fit_transform(df_processed[[col]])
+            log[col].append(f"imputer: {imp_strategy}")
+
+            scaler_name = preprocessing_config["numeric"]["scaling"][0]
+            if scaler_name == "StandardScaler":
+                scaler = StandardScaler()
+            elif scaler_name == "RobustScaler":
+                scaler = RobustScaler()
+            elif scaler_name == "QuantileTransformer":
+                scaler = QuantileTransformer(output_distribution='normal')
+            else:
+                scaler = None
+
+            if scaler:
+                df_processed[[col]] = scaler.fit_transform(df_processed[[col]])
+                log[col].append(f"scaler: {scaler_name}")
+
+            outlier_method = preprocessing_config["numeric"]["outlier_handling"][0]
+            log[col].append(f"outlier_handling: {outlier_method}")
+
+        elif dtype == "categorical":
+            imp_strategy = preprocessing_config["categorical"]["imputer"][0]
+            imputer = SimpleImputer(strategy=imp_strategy, fill_value="missing" if imp_strategy == "missing_category" else None)
+            df_processed[[col]] = imputer.fit_transform(df_processed[[col]])
+            log[col].append(f"imputer: {imp_strategy}")
+
+            encoding_method = preprocessing_config["categorical"]["encoding"][0]
+            if encoding_method == "OneHotEncoder":
+                encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+                encoded = encoder.fit_transform(df_processed[[col]])
+                cols_encoded = [f"{col}__{cat}" for cat in encoder.categories_[0]]
+                df_encoded = pd.DataFrame(encoded, columns=cols_encoded, index=df_processed.index)
+                df_processed = pd.concat([df_processed.drop(columns=[col]), df_encoded], axis=1)
+                log[col].append("encoding: OneHotEncoder")
+            else:
+                log[col].append(f"encoding: {encoding_method} (not implemented)")
+
+        elif dtype == "text":
+
+            if "lowercase" in preprocessing_config["text"]["cleaning"]:
+                df_processed[col] = df_processed[col].astype(str).str.lower()
+                log[col].append("cleaning: lowercase")
+            
+        elif dtype == "time_series":
+            log[col].append("time_series: no preprocessing applied")
+
+    return df_processed, log
+
+async def predict_from_df(df: pd.DataFrame):
+    print("Received data for prediction")
+    detected_types = detect_data_types(df, pipeline_config["data_type_detection"])
+    df_processed, preprocessing_log = preprocess_data(df, detected_types, pipeline_config["preprocessing"])
+    return {
+        "detected_types": detected_types,
+        "preprocessing_log": preprocessing_log,
+        "processed_data_preview": df_processed.head(5).to_dict(orient="records"),
+    }
+
+@app.post("/api/prediction")
+async def run_prediction(file: UploadFile = File(...)):
+    df = await read_file_to_df(file)
+    print("run_prediction: Received file data")
+    result = await predict_from_df(df)
+    return result

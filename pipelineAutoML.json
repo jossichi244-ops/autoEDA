@@ -1,0 +1,79 @@
+{
+  "data_type_detection": {
+    "time_series": {
+      "criteria": ["datetime_index", "ordered_timestamps"],
+      "enabled": true
+    },
+    "text": {
+      "criteria": ["long_string_columns", "n_tokens_avg > 5"],
+      "enabled": true
+    },
+    "numeric": {
+      "criteria": ["float64", "int64"],
+      "enabled": true
+    },
+    "categorical": {
+      "criteria": ["object", "category"],
+      "enabled": true
+    }
+  },
+  "preprocessing": {
+    "numeric": {
+      "imputer": ["median", "mean", "knn"],
+      "scaling": ["StandardScaler", "RobustScaler", "QuantileTransformer"],
+      "outlier_handling": ["none", "winsorize", "clip"]
+    },
+    "categorical": {
+      "imputer": ["most_frequent", "missing_category"],
+      "encoding": ["OneHotEncoder", "TargetEncoder", "FrequencyEncoder"]
+    },
+    "text": {
+      "cleaning": [
+        "lowercase",
+        "remove_stopwords",
+        "lemmatization",
+        "stemming"
+      ],
+      "vectorizers": ["TfidfVectorizer", "HashingVectorizer"],
+      "embeddings": ["Word2Vec", "FastText", "BERT", "GPT_embeddings"],
+      "topic_modeling": ["LDA", "BERTopic"]
+    },
+    "time_series": {
+      "features": ["lag", "rolling_mean", "rolling_std", "exp_smoothing"],
+      "decomposition": ["STL", "seasonal_decompose"],
+      "frequency": ["daily", "weekly", "monthly"]
+    },
+    "target": {
+      "imbalance": ["none", "smote", "adasyn", "class_weight"],
+      "threshold": 0.2
+    }
+  },
+  "feature_engineering": {
+    "numeric": {
+      "apply_if": "n_numeric >= 2",
+      "strategies": [
+        "interaction_terms",
+        "polynomial_degree=2",
+        "polynomial_degree=3"
+      ]
+    },
+    "categorical": {
+      "apply_if": "n_categorical >= 2",
+      "strategies": ["cross_features"]
+    },
+    "text": {
+      "apply_if": "avg_tokens > 5",
+      "strategies": ["sentiment_analysis", "ner", "topic_modeling"]
+    },
+    "time_series": {
+      "apply_if": "has_datetime_index",
+      "strategies": ["lag_features", "rolling_stats", "trend", "seasonality"]
+    }
+  },
+  "feature_selection": {
+    "numeric": ["lasso", "variance_threshold", "pca"],
+    "categorical": ["chi2", "mutual_info"],
+    "text": ["tfidf_feature_importance", "embedding_dim_reduction"],
+    "time_series": ["autocorrelation_selection", "feature_importance"]
+  }
+}
