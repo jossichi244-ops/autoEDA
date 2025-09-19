@@ -1,5 +1,5 @@
 # backend/app/main.py
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import json
@@ -1917,7 +1917,7 @@ def preprocess_data(
 
     return df_processed, log, updated_types
 
-async def predict_from_df(df: pd.DataFrame,  target_col: str = None):
+async def predict_from_df(df: pd.DataFrame, target_col: str = None):
     print("Received data for prediction")
     detected_types = detect_data_types(df, pipeline_config["data_type_detection"])
 
@@ -1925,17 +1925,17 @@ async def predict_from_df(df: pd.DataFrame,  target_col: str = None):
         df, detected_types, pipeline_config["preprocessing"]
     )
 
-#     # Feature engineering
-    df_fe, fe_log = feature_engineering(df_processed, updated_types, pipeline_config["feature_engineering"])
+    # Feature engineering
+    df_fe, fe_log = feature_engineering(
+        df_processed, updated_types, pipeline_config["feature_engineering"]
+    )
     
-#     # Feature selection
+    # Feature selection
     df_fs, fs_log = feature_selection(
-    df_fe, 
-    updated_types, 
-    pipeline_config["feature_selection"], 
-    target_col=target_col
-)
+        df_fe, updated_types, pipeline_config["feature_selection"], target_col=target_col
+    )
     
+    # Model selection
     model_selection_log = select_models_for_training(
         df_fs, updated_types, pipeline_config["model_selection"], target_col=target_col
     )
@@ -2103,6 +2103,28 @@ def feature_selection(
 
     return df_fs, log
 
+def auto_detect_target(df: pd.DataFrame, detected_types: Dict[str, str]) -> str:
+    common_target_names = ["target", "label", "y", "class", "price", "medv"]
+
+    candidate_cols = [c for c in df.columns if "cluster" not in c.lower()]
+
+    # Nếu chỉ có 1 numeric duy nhất
+    numeric_cols = [c for c in candidate_cols if detected_types.get(c) == "numeric"]
+    if len(numeric_cols) == 1:
+        return numeric_cols[0]
+
+    # Nếu có tên phổ biến
+    for c in candidate_cols:
+        if c.lower() in common_target_names:
+            return c
+
+    # Nếu có numeric continuous nhiều giá trị
+    for c in numeric_cols:
+        if df[c].nunique() > 20 and pd.api.types.is_numeric_dtype(df[c]):
+            return c
+
+    return None
+
 def select_models_for_training(
     df: pd.DataFrame,
     detected_types: Dict[str, str],
@@ -2110,14 +2132,14 @@ def select_models_for_training(
     target_col: str = None
 ) -> Dict[str, Any]:
     """
-    Xác định problem_type và chọn model theo rules hoặc fallback.
+    Chọn mô hình ML dựa vào target_col, kiểu dữ liệu, context và rule-based config.
     """
-    n_features = df.shape[1] - (1 if target_col else 0)
-    dataset_size = df.shape[0]
-
-    # --- Xác định loại bài toán ---
-    if target_col:
+    if not target_col:
+        target_col = auto_detect_target(df, detected_types)
+    # --- 1. Xác định loại bài toán ---
+    if target_col and target_col in df.columns:
         y = df[target_col]
+
         if pd.api.types.is_numeric_dtype(y):
             if y.nunique() <= 20 and str(y.dtype).startswith("int"):
                 problem_type = "classification"
@@ -2128,7 +2150,10 @@ def select_models_for_training(
     else:
         problem_type = "clustering"
 
-    # --- Context ---
+    # --- 2. Tạo context dataset ---
+    n_features = df.shape[1] - (1 if target_col else 0)
+    dataset_size = df.shape[0]
+
     context = {
         "problem_type": problem_type,
         "n_features": n_features,
@@ -2146,35 +2171,53 @@ def select_models_for_training(
         "has_arbitrary_shapes": False
     }
 
-    # check imbalance target
+    # --- 3. Check imbalance ---
     if target_col and problem_type == "classification":
         y_counts = df[target_col].value_counts(normalize=True)
         if y_counts.min() < 0.2:
             context["has_imbalanced_target"] = True
 
-    # --- Rule-based auto-select ---
+    # --- 4. Rule-based auto-select ---
     selected_models, justification = None, None
-    if model_config["auto_select"]["enabled"]:
+    if model_config.get("auto_select", {}).get("enabled", False):
         for rule in model_config["auto_select"]["justification"]["rules"]:
             try:
-                if eval(rule["condition"], {}, context):
-                    selected_models = rule["selected_models"]
-                    justification = rule["justification"]
-                    break
-            except Exception:
+                safe_globals = {
+                    "__builtins__": {},
+                    "true": True,
+                    "false": False,
+                    "True": True,
+                    "False": False
+                }
+
+                try:
+                    if eval(rule["condition"], safe_globals, context):
+                        selected_models = rule["selected_models"]
+                        justification = rule["justification"]
+                        break
+                except Exception as e:
+                    print(f"⚠️ Rule eval error: {rule['condition']} → {e}")
+                    continue
+            except Exception as e:
+                print(f"⚠️ Rule eval error: {rule['condition']} → {e}")
                 continue
 
-    # --- Fallback ---
+    # --- 5. Fallback ---
     if not selected_models:
         fallback = model_config["auto_select"]["justification"]["fallback"]
 
-        # ✅ Nếu problem_type = clustering thì fallback = KMeans
         if problem_type == "clustering":
             selected_models = ["KMeans"]
-            justification = "Không có điều kiện nào khớp → fallback clustering dùng KMeans."
+            justification = "Không có target → Clustering fallback chọn KMeans."
+        elif problem_type == "regression":
+            selected_models = fallback.get("regression", ["RandomForestRegressor"])
+            justification = "Fallback regression."
+        elif problem_type == "classification":
+            selected_models = fallback.get("classification", ["RandomForestClassifier"])
+            justification = "Fallback classification."
         else:
-            selected_models = fallback["selected_models"]
-            justification = fallback["justification"]
+            selected_models = fallback.get("default", ["RandomForest"])
+            justification = "Fallback default model."
 
     return {
         "problem_type": problem_type,
@@ -2184,9 +2227,29 @@ def select_models_for_training(
     }
 
 @app.post("/api/prediction")
-async def run_prediction(file: UploadFile = File(...)):
+async def run_prediction(file: UploadFile = File(...), target: str = Form(None)):
     df = await read_file_to_df(file)
-    print("run_prediction: Received file data")
-    target_col = df.columns[-1] if len(df.columns) > 0 else None
-    result = await predict_from_df(df,target_col=target_col)
+
+    # Detect types
+    detected_types = detect_data_types(df, pipeline_config["data_type_detection"])
+
+    # Determine target
+    if target and target in df.columns:
+        target_col = target
+    else:
+        target_col = auto_detect_target(df, detected_types)
+
+    # Đánh dấu target
+    if target_col:
+        detected_types[target_col] = "target"
+
+    # Run pipeline
+    result = await predict_from_df(df, target_col=target_col)
+
+    # Attach info
+    result["target_col"] = target_col
+    result["candidate_targets"] = [
+        c for c in df.columns if "cluster" not in c.lower()
+    ]
     return result
+
