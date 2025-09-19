@@ -1789,36 +1789,49 @@ def detect_data_types(df: pd.DataFrame, detection_config: Dict[str, Any]) -> Dic
     for col in df.columns:
         col_dtype = df[col].dtype
 
-        # Time series detection
+        # --- Time series detection ---
         if detection_config["time_series"]["enabled"]:
-            # criteria: datetime index or ordered timestamps
+            # Nếu dtype đã là datetime
             if pd.api.types.is_datetime64_any_dtype(col_dtype):
                 detected[col] = "time_series"
                 continue
 
-        # Numeric detection
+            # Nếu là object/string nhưng parse được sang datetime
+            if col_dtype == "object":
+                try:
+                    parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
+                    # Nếu > 80% giá trị parse thành datetime hợp lệ → coi là time_series
+                    if parsed.notna().mean() > 0.8:
+                        detected[col] = "time_series"
+                        continue
+                except Exception:
+                    pass
+
+        # --- Numeric detection ---
         if detection_config["numeric"]["enabled"]:
             if col_dtype.name in detection_config["numeric"]["criteria"]:
                 detected[col] = "numeric"
                 continue
 
-        # Categorical detection
+        # --- Categorical detection ---
         if detection_config["categorical"]["enabled"]:
             if col_dtype.name in detection_config["categorical"]["criteria"]:
                 detected[col] = "categorical"
                 continue
 
-        # Text detection
+        # --- Text detection ---
         if detection_config["text"]["enabled"]:
-            # check long string + avg tokens > 5
-            sample_vals = df[col].dropna().astype(str).sample(min(100, len(df[col])), random_state=42)
-            avg_len = sample_vals.str.len().mean()
-            avg_tokens = sample_vals.str.split().map(len).mean()
-            if avg_len > 50 and avg_tokens > 5:
-                detected[col] = "text"
-                continue
+            try:
+                sample_vals = df[col].dropna().astype(str).sample(min(100, len(df[col])), random_state=42)
+                avg_len = sample_vals.str.len().mean()
+                avg_tokens = sample_vals.str.split().map(len).mean()
+                if avg_len > 50 and avg_tokens > 5:
+                    detected[col] = "text"
+                    continue
+            except Exception:
+                pass
 
-        # Mặc định categorical
+        # --- Default: categorical ---
         detected[col] = "categorical"
 
     return detected
@@ -1834,11 +1847,12 @@ def preprocess_data(
 
     df_processed = df.copy()
     log = {}
-    updated_types = detected_types.copy()
+    updated_types = detected_types.copy()  # copy từ EDA (raw)
 
     for col, dtype in list(detected_types.items()):
         log[col] = []
 
+        # --- Numeric ---
         if dtype == "numeric":
             imp_strategy = preprocessing_config["numeric"]["imputer"][0] 
             imputer = SimpleImputer(strategy=imp_strategy)
@@ -1862,6 +1876,7 @@ def preprocess_data(
             outlier_method = preprocessing_config["numeric"]["outlier_handling"][0]
             log[col].append(f"outlier_handling: {outlier_method}")
 
+        # --- Categorical ---
         elif dtype == "categorical":
             imp_strategy = preprocessing_config["categorical"]["imputer"][0]
             imputer = SimpleImputer(
@@ -1879,23 +1894,25 @@ def preprocess_data(
                 cols_encoded = [f"{col}__{cat}" for cat in encoder.categories_[0]]
                 df_encoded = pd.DataFrame(encoded, columns=cols_encoded, index=df_processed.index)
 
-                # Drop cột gốc, thêm cột mới
+                # Replace cột gốc bằng cột mới
                 df_processed = pd.concat([df_processed.drop(columns=[col]), df_encoded], axis=1)
                 log[col].append("encoding: OneHotEncoder")
 
-                # ✅ Update detected_types: xóa cột gốc, thêm cột mới
-                updated_types.pop(col, None)
-                for new_col in cols_encoded:
-                    updated_types[new_col] = "categorical"
+                # ✅ vẫn giữ thông tin column gốc, không thêm từng dummy col
+                updated_types[col] = "categorical_encoded"
+
             else:
                 log[col].append(f"encoding: {encoding_method} (not implemented)")
 
+        # --- Text ---
         elif dtype == "text":
             if "lowercase" in preprocessing_config["text"]["cleaning"]:
                 df_processed[col] = df_processed[col].astype(str).str.lower()
                 log[col].append("cleaning: lowercase")
             
+        # --- Time series ---
         elif dtype == "time_series":
+            # Tuỳ theo config, ở đây mình chưa làm gì
             log[col].append("time_series: no preprocessing applied")
 
     return df_processed, log, updated_types
@@ -1916,7 +1933,7 @@ async def predict_from_df(df: pd.DataFrame,  target_col: str = None):
     df_fe, 
     updated_types, 
     pipeline_config["feature_selection"], 
-    target_col=None  
+    target_col=target_col
 )
     
     model_selection_log = select_models_for_training(
@@ -1937,78 +1954,59 @@ def feature_engineering(
     detected_types: Dict[str, str],
     fe_config: Dict[str, Any]
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-
     from sklearn.preprocessing import PolynomialFeatures
+    import numpy as np
+    import pandas as pd
 
-    df_fe = df
+    df_fe = df.copy()
     log = {}
 
-    n_numeric = sum(1 for t in detected_types.values() if t == "numeric")
-    n_categorical = sum(1 for t in detected_types.values() if t == "categorical")
-    avg_tokens = 0
-    if any(t == "text" for t in detected_types.values()):
-        text_cols = [c for c, t in detected_types.items() if t == "text"]
-        samples = df[text_cols].astype(str).apply(lambda x: x.str.split().map(len))
-        avg_tokens = samples.mean().mean()
+    num_cols = [c for c, t in detected_types.items() if t == "numeric"]
+    cat_cols = [c for c, t in detected_types.items() if t == "categorical"]
 
-    # Numeric feature engineering
-    if n_numeric >= 2 and "numeric" in fe_config:
+    # --- Numeric feature engineering ---
+    if len(num_cols) >= 2 and "numeric" in fe_config:
         log["numeric"] = []
         strategies = fe_config["numeric"]["strategies"]
-        num_cols = [c for c, t in detected_types.items() if t == "numeric"]
 
+        # Interaction terms
         if "interaction_terms" in strategies:
-            new_interactions = {}
-            for i, c1 in enumerate(num_cols):
-                for c2 in num_cols[i+1:]:
-                    new_col = f"{c1}_x_{c2}"
-                    df_fe[new_col] = df_fe[c1] * df_fe[c2]
-                    log["numeric"].append(f"Created interaction {new_col}")
-            if new_interactions:
-                df_interactions = pd.DataFrame(new_interactions, index=df_fe.index)
-                df_fe = pd.concat([df_fe, df_interactions], axis=1)
+            new_cols = {
+                f"{c1}_x_{c2}": df[c1].values * df[c2].values
+                for i, c1 in enumerate(num_cols)
+                for c2 in num_cols[i+1:]
+            }
+            if new_cols:
+                df_fe = pd.concat([df_fe, pd.DataFrame(new_cols, index=df.index)], axis=1)
+                log["numeric"].append(f"Created {len(new_cols)} interaction features")
 
-        if any(s.startswith("polynomial_degree") for s in strategies):
-            degree = max(int(s.split("=")[1]) for s in strategies if s.startswith("polynomial_degree"))
+        # Polynomial features
+        poly_degrees = [int(s.split("=")[1]) for s in strategies if s.startswith("polynomial_degree")]
+        if poly_degrees:
+            degree = max(poly_degrees)
             poly = PolynomialFeatures(degree=degree, include_bias=False)
-            poly_features = poly.fit_transform(df_fe[num_cols])
+            poly_features = poly.fit_transform(df[num_cols].values)
             poly_names = poly.get_feature_names_out(num_cols)
-            poly_df = pd.DataFrame(poly_features, columns=poly_names, index=df_fe.index)
-            df_fe = pd.concat([df_fe, poly_df], axis=1)
-            for idx, name in enumerate(poly_names):
-                if name not in df_fe.columns:  
-                    df_fe[name] = poly_features[:, idx]
-            log["numeric"].append(f"Applied PolynomialFeatures degree={degree}")
 
-    # Categorical feature engineering
-    if n_categorical >= 2 and "categorical" in fe_config:
-        log["categorical"] = []
-        cat_cols = [c for c, t in detected_types.items() if t == "categorical"]
+            new_poly = {name: poly_features[:, i] for i, name in enumerate(poly_names) if name not in df_fe.columns}
+            if new_poly:
+                df_fe = pd.concat([df_fe, pd.DataFrame(new_poly, index=df.index)], axis=1)
+                log["numeric"].append(f"Applied PolynomialFeatures degree={degree}, added {len(new_poly)} features")
+
+    # --- Categorical cross features ---
+    if len(cat_cols) >= 2 and "categorical" in fe_config:
         if "cross_features" in fe_config["categorical"]["strategies"]:
-            new_columns = {}
+            log["categorical"] = []
+            new_cols = {}
             for i, c1 in enumerate(cat_cols):
+                c1_vals = df[c1].astype(str).values
                 for c2 in cat_cols[i+1:]:
+                    c2_vals = df[c2].astype(str).values
                     new_col = f"{c1}_x_{c2}"
-                    df_fe[new_col] = df_fe[c1].astype(str) + "_" + df_fe[c2].astype(str)
+                    new_cols[new_col] = np.char.add(np.char.add(c1_vals, "_"), c2_vals)
                     log["categorical"].append(f"Created cross feature {new_col}")
-            if new_columns:
-                df_new = pd.DataFrame(new_columns, index=df_fe.index)
-                df_fe = pd.concat([df_fe, df_new], axis=1)
-                
-    # Text feature engineering (placeholder)
-    if avg_tokens > 5 and "text" in fe_config:
-        log["text"] = []
-        strategies = fe_config["text"]["strategies"]
-        for s in strategies:
-            log["text"].append(f"Applied {s} (not implemented in backend demo)")
-
-    # Time series feature engineering (placeholder)
-    if "time_series" in fe_config:
-        ts_cols = [c for c, t in detected_types.items() if t == "time_series"]
-        if ts_cols:
-            log["time_series"] = []
-            for s in fe_config["time_series"]["strategies"]:
-                log["time_series"].append(f"Applied {s} on {ts_cols} (not implemented in backend demo)")
+            if new_cols:
+                df_fe = pd.concat([df_fe, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     return df_fe, log
 
@@ -2189,5 +2187,6 @@ def select_models_for_training(
 async def run_prediction(file: UploadFile = File(...)):
     df = await read_file_to_df(file)
     print("run_prediction: Received file data")
-    result = await predict_from_df(df)
+    target_col = df.columns[-1] if len(df.columns) > 0 else None
+    result = await predict_from_df(df,target_col=target_col)
     return result
