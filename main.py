@@ -1873,6 +1873,7 @@ def preprocess_data(
 
             encoding_method = preprocessing_config["categorical"]["encoding"][0]
             if encoding_method == "OneHotEncoder":
+                df_processed[col] = df_processed[col].astype(str)
                 encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
                 encoded = encoder.fit_transform(df_processed[[col]])
                 cols_encoded = [f"{col}__{cat}" for cat in encoder.categories_[0]]
@@ -1899,7 +1900,7 @@ def preprocess_data(
 
     return df_processed, log, updated_types
 
-async def predict_from_df(df: pd.DataFrame):
+async def predict_from_df(df: pd.DataFrame,  target_col: str = None):
     print("Received data for prediction")
     detected_types = detect_data_types(df, pipeline_config["data_type_detection"])
 
@@ -1907,23 +1908,27 @@ async def predict_from_df(df: pd.DataFrame):
         df, detected_types, pipeline_config["preprocessing"]
     )
 
-    # Feature engineering
+#     # Feature engineering
     df_fe, fe_log = feature_engineering(df_processed, updated_types, pipeline_config["feature_engineering"])
     
-    # Feature selection
+#     # Feature selection
     df_fs, fs_log = feature_selection(
     df_fe, 
     updated_types, 
     pipeline_config["feature_selection"], 
     target_col=None  
 )
-
+    
+    model_selection_log = select_models_for_training(
+        df_fs, updated_types, pipeline_config["model_selection"], target_col=target_col
+    )
     
     return {
         "detected_types": updated_types,  
         "preprocessing_log": preprocessing_log,
         "feature_engineering_log": fe_log,
         "feature_selection_log": fs_log,
+        "model_selection_log": model_selection_log,
         "processed_data_preview": df_fs.head(5).to_dict(orient="records"),
     }
 
@@ -1934,9 +1939,8 @@ def feature_engineering(
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
 
     from sklearn.preprocessing import PolynomialFeatures
-    import numpy as np
 
-    df_fe = df.copy()
+    df_fe = df
     log = {}
 
     n_numeric = sum(1 for t in detected_types.values() if t == "numeric")
@@ -1954,11 +1958,15 @@ def feature_engineering(
         num_cols = [c for c, t in detected_types.items() if t == "numeric"]
 
         if "interaction_terms" in strategies:
+            new_interactions = {}
             for i, c1 in enumerate(num_cols):
                 for c2 in num_cols[i+1:]:
                     new_col = f"{c1}_x_{c2}"
                     df_fe[new_col] = df_fe[c1] * df_fe[c2]
                     log["numeric"].append(f"Created interaction {new_col}")
+            if new_interactions:
+                df_interactions = pd.DataFrame(new_interactions, index=df_fe.index)
+                df_fe = pd.concat([df_fe, df_interactions], axis=1)
 
         if any(s.startswith("polynomial_degree") for s in strategies):
             degree = max(int(s.split("=")[1]) for s in strategies if s.startswith("polynomial_degree"))
@@ -1967,6 +1975,9 @@ def feature_engineering(
             poly_names = poly.get_feature_names_out(num_cols)
             poly_df = pd.DataFrame(poly_features, columns=poly_names, index=df_fe.index)
             df_fe = pd.concat([df_fe, poly_df], axis=1)
+            for idx, name in enumerate(poly_names):
+                if name not in df_fe.columns:  
+                    df_fe[name] = poly_features[:, idx]
             log["numeric"].append(f"Applied PolynomialFeatures degree={degree}")
 
     # Categorical feature engineering
@@ -1974,12 +1985,16 @@ def feature_engineering(
         log["categorical"] = []
         cat_cols = [c for c, t in detected_types.items() if t == "categorical"]
         if "cross_features" in fe_config["categorical"]["strategies"]:
+            new_columns = {}
             for i, c1 in enumerate(cat_cols):
                 for c2 in cat_cols[i+1:]:
                     new_col = f"{c1}_x_{c2}"
                     df_fe[new_col] = df_fe[c1].astype(str) + "_" + df_fe[c2].astype(str)
                     log["categorical"].append(f"Created cross feature {new_col}")
-
+            if new_columns:
+                df_new = pd.DataFrame(new_columns, index=df_fe.index)
+                df_fe = pd.concat([df_fe, df_new], axis=1)
+                
     # Text feature engineering (placeholder)
     if avg_tokens > 5 and "text" in fe_config:
         log["text"] = []
@@ -2007,7 +2022,7 @@ def feature_selection(
     from sklearn.decomposition import PCA
     from sklearn.linear_model import LassoCV
 
-    df_fs = df.copy()
+    df_fs = df
     log = {}
 
     # Numeric feature selection
@@ -2089,6 +2104,86 @@ def feature_selection(
         log["time_series"] = ["autocorrelation_selection (placeholder)", "feature_importance (placeholder)"]
 
     return df_fs, log
+
+def select_models_for_training(
+    df: pd.DataFrame,
+    detected_types: Dict[str, str],
+    model_config: Dict[str, Any],
+    target_col: str = None
+) -> Dict[str, Any]:
+    """
+    Xác định problem_type và chọn model theo rules hoặc fallback.
+    """
+    n_features = df.shape[1] - (1 if target_col else 0)
+    dataset_size = df.shape[0]
+
+    # --- Xác định loại bài toán ---
+    if target_col:
+        y = df[target_col]
+        if pd.api.types.is_numeric_dtype(y):
+            if y.nunique() <= 20 and str(y.dtype).startswith("int"):
+                problem_type = "classification"
+            else:
+                problem_type = "regression"
+        else:
+            problem_type = "classification"
+    else:
+        problem_type = "clustering"
+
+    # --- Context ---
+    context = {
+        "problem_type": problem_type,
+        "n_features": n_features,
+        "dataset_size": dataset_size,
+        "has_imbalanced_target": False,
+        "interpretability_required": False,
+        "has_seasonality": "time_series" in detected_types.values(),
+        "has_lag_features": any("lag" in c for c in df.columns),
+        "contains_text_features": any(v == "text" for v in detected_types.values()),
+        "contains_categorical_features": any(v == "categorical" for v in detected_types.values()),
+        "n_unique_categories": max(
+            [df[c].nunique() for c, t in detected_types.items() if t == "categorical"],
+            default=0
+        ),
+        "has_arbitrary_shapes": False
+    }
+
+    # check imbalance target
+    if target_col and problem_type == "classification":
+        y_counts = df[target_col].value_counts(normalize=True)
+        if y_counts.min() < 0.2:
+            context["has_imbalanced_target"] = True
+
+    # --- Rule-based auto-select ---
+    selected_models, justification = None, None
+    if model_config["auto_select"]["enabled"]:
+        for rule in model_config["auto_select"]["justification"]["rules"]:
+            try:
+                if eval(rule["condition"], {}, context):
+                    selected_models = rule["selected_models"]
+                    justification = rule["justification"]
+                    break
+            except Exception:
+                continue
+
+    # --- Fallback ---
+    if not selected_models:
+        fallback = model_config["auto_select"]["justification"]["fallback"]
+
+        # ✅ Nếu problem_type = clustering thì fallback = KMeans
+        if problem_type == "clustering":
+            selected_models = ["KMeans"]
+            justification = "Không có điều kiện nào khớp → fallback clustering dùng KMeans."
+        else:
+            selected_models = fallback["selected_models"]
+            justification = fallback["justification"]
+
+    return {
+        "problem_type": problem_type,
+        "selected_models": selected_models,
+        "justification": justification,
+        "context": context
+    }
 
 @app.post("/api/prediction")
 async def run_prediction(file: UploadFile = File(...)):
