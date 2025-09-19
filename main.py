@@ -22,6 +22,7 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from sklearn.ensemble import IsolationForest, RandomForestClassifier, RandomForestRegressor
 import logging
 from typing import Optional
+from scipy.stats import zscore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,11 +42,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def infer_schema_from_df(df: pd.DataFrame) -> dict:
+import pandas as pd
+import numpy as np
+
+def infer_schema_from_df(df: pd.DataFrame, max_unique_for_enum: int = 20) -> dict:
     props = {}
+
     for col in df.columns:
         series = df[col].dropna()
         dtype = "string"
+
+        # --- Kiểm tra dtype gốc ---
         if pd.api.types.is_integer_dtype(series):
             dtype = "integer"
         elif pd.api.types.is_float_dtype(series):
@@ -53,22 +60,48 @@ def infer_schema_from_df(df: pd.DataFrame) -> dict:
         elif pd.api.types.is_bool_dtype(series):
             dtype = "boolean"
         elif pd.api.types.is_datetime64_any_dtype(series):
-            dtype = "string"
-            fmt = "date-time"
+            dtype = "datetime"
         else:
-            sample = series.astype(str).head(100).tolist()
-            if all(s.isdigit() for s in sample if s not in ("", "nan")):
+            # --- fallback: thử parse string ---
+            sample_str = series.astype(str).head(100)
+
+            # integer regex
+            if sample_str.str.match(r"^-?\d+$").all():
                 dtype = "integer"
+            # float regex
+            elif sample_str.str.match(r"^-?\d+(\.\d+)?$").all():
+                dtype = "number"
             else:
-                dtype = "string"
-        prop = {"type": dtype}
+                parsed = pd.to_datetime(sample_str, errors="coerce", infer_datetime_format=True)
+                if parsed.notna().mean() > 0.8:
+                    dtype = "datetime"
+                else:
+                    dtype = "string"
+
+        unique_count = series.nunique()
+
+        # --- Build prop ---
+        if dtype == "datetime":
+            prop = {"type": "string", "format": "date-time"}
+        elif dtype == "string" and unique_count <= max_unique_for_enum:
+            prop = {"type": "string", "enum": series.unique().tolist()}
+        else:
+            prop = {"type": dtype}
+
         props[col] = prop
-    return {
+
+    schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "GeneratedSchema",
         "type": "object",
         "properties": props
     }
+
+    return schema
+
+def shannon_entropy(values):
+    freq = values.value_counts(normalize=True)
+    return -(freq * np.log2(freq + 1e-9)).sum()
 
 def analyze_column(col: pd.Series) -> dict:
     series = col.dropna().astype(str)
@@ -76,21 +109,29 @@ def analyze_column(col: pd.Series) -> dict:
     unique_count = series.nunique()
     total = len(series)
 
-    # Xác định loại dữ liệu
+    # numeric
     if pd.api.types.is_integer_dtype(col) or pd.api.types.is_float_dtype(col):
         dtype = "numeric"
+
+    # datetime (cột vốn đã là datetime hoặc parse được từ chuỗi)
     elif pd.api.types.is_datetime64_any_dtype(col):
         dtype = "datetime"
     else:
-        # thử phân biệt categorical vs text
-        if unique_count < 0.05 * total:  # ít hơn 5% giá trị khác biệt
+        # thử parse datetime từ chuỗi
+        dt_parsed = pd.to_datetime(series, errors="coerce", infer_datetime_format=True)
+        if dt_parsed.notnull().mean() > 0.8:  # parse được >=80%
+            dtype = "datetime"
+        elif unique_count <= 50 or unique_count < 0.05 * total:
             dtype = "categorical"
-        elif series.str.contains(",").any():
+        elif (
+            series.str.contains(r"[;,|]").any() or
+            (unique_count > 50 and shannon_entropy(series) < math.log2(unique_count) * 0.3)
+        ):
             dtype = "multi-select"
         else:
             dtype = "text"
 
-    # Thống kê cơ bản
+    # Stats
     stats = {}
     if dtype == "numeric":
         numeric_col = pd.to_numeric(col, errors="coerce")
@@ -100,7 +141,7 @@ def analyze_column(col: pd.Series) -> dict:
             "mean": convert_numpy_types(numeric_col.mean()),
             "std": convert_numpy_types(numeric_col.std()),
         }
-    elif dtype == "categorical" or dtype == "multi-select":
+    elif dtype in ("categorical", "multi-select"):
         stats = {
             "unique_values": convert_numpy_types(unique_count),
             "top_values": convert_numpy_types(series.value_counts().head(5).to_dict())
@@ -153,10 +194,10 @@ def convert_numpy_types(obj):
         return None
     return obj
 
-def inspect_dataset(df: pd.DataFrame, max_sample: int = 10) -> dict:
-    """Comprehensive Data Inspection (Bước 2) — returns detailed diagnostics."""
+def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str] = None) -> dict:
+    """Comprehensive Data Inspection (Bước 2) — returns detailed diagnostics with target-aware correlation."""
+
     total_rows, total_cols = df.shape
-    # head & tail
     head = df.head(max_sample).to_dict(orient="records")
     tail = df.tail(max_sample).to_dict(orient="records")
 
@@ -179,19 +220,14 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10) -> dict:
         "total_cells": int(total_rows * total_cols),
         "total_missing": int(null_counts.sum()),
         "percent_missing": float((null_counts.sum() / max(1, total_rows * total_cols)).round(4)),
-        "columns_missing": convert_numpy_types(null_counts.to_dict()),
-        "columns_missing_percent": convert_numpy_types(null_percent.to_dict()),
-        "top_missing_columns": convert_numpy_types(
-            null_percent.sort_values(ascending=False).head(10).to_dict()
-        ),
-        "columns_many_missing": convert_numpy_types(
-            (null_percent[null_percent > 0.5]).sort_values(ascending=False).to_dict()
-        )
+        "columns_missing": null_counts.to_dict(),
+        "columns_missing_percent": null_percent.to_dict(),
+        "top_missing_columns": null_percent.sort_values(ascending=False).head(10).to_dict(),
+        "columns_many_missing": (null_percent[null_percent > 0.5]).sort_values(ascending=False).to_dict()
     }
 
     # duplicates
     try:
-        dup_mask = df.duplicated(keep=False)
         duplicate_rows_count = int(df.duplicated().sum())
         duplicate_rows_sample = df[df.duplicated(keep=False)].head(5).to_dict(orient="records")
     except Exception:
@@ -200,10 +236,14 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10) -> dict:
 
     duplicates_summary = {
         "duplicate_count": duplicate_rows_count,
-        "duplicate_sample": convert_numpy_types(duplicate_rows_sample),
+        "duplicate_sample": duplicate_rows_sample,
     }
 
-    # quick column summaries
+    # optional target
+    target_series = None
+    if target and target in df.columns:
+        target_series = df[target]
+
     columns = {}
     for col in df.columns:
         col_series = df[col]
@@ -213,69 +253,53 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10) -> dict:
         unique_pct = round(unique_count / max(1, total_rows), 4)
         top_values = col_series.value_counts(dropna=True).head(5).to_dict()
 
-        # mixed type detection (sample up to 1000 non-null)
+        # mixed type detection
         sample_vals = col_series.dropna().head(1000).tolist()
         types_seen = set(type(v).__name__ for v in sample_vals if v is not None)
         mixed_types = len(types_seen) > 1
 
-        # detect datetime-parseable fraction
-        # parsed_dt = pd.to_datetime(col_series, errors="coerce")
+        # parse datetime
         try:
-            parsed_dt = pd.to_datetime(
-                col_series,
-                errors="coerce",
-                infer_datetime_format=True,
-                dayfirst=True  # nếu file của bạn dùng định dạng ngày-tháng
-            )
+            parsed_dt = pd.to_datetime(col_series, errors="coerce", infer_datetime_format=True, dayfirst=True)
         except Exception:
             parsed_dt = pd.to_datetime(col_series, errors="coerce")
-
         dt_parsed_pct = float(parsed_dt.notnull().sum() / max(1, total_rows))
 
-        # detect numeric-parseable fraction
+        # parse numeric
         numeric_parsed = pd.to_numeric(col_series, errors="coerce")
         num_parsed_pct = float(numeric_parsed.notnull().sum() / max(1, total_rows))
 
-        # detect multi-select heuristics (delimiter presence)
-        has_separator = False
+        # detect multi-select
         sep_candidates = [",", ";", "|", " / "]
-        if total_rows > 0:
-            contains_sep = col_series.astype(str).str.contains("|".join([s.replace(" ", r"\s*") for s in sep_candidates]), regex=True, na=False)
-            has_separator = bool(contains_sep.sum() / max(1, total_rows) > 0.2)
+        contains_sep = col_series.astype(str).str.contains("|".join([s.replace(" ", r"\s*") for s in sep_candidates]),
+                                                          regex=True, na=False)
+        has_separator = bool(contains_sep.sum() / max(1, total_rows) > 0.2)
 
-        # numeric stats & outlier detection (IQR)
-        numeric_stats = None
-        outlier_count = None
-        skew = None
-        kurt = None
-        zero_count = None
+        # numeric stats & outliers
+        numeric_stats, outlier_count, skew, kurt, zero_count = None, None, None, None, None
         if num_parsed_pct > 0.5:
             num_series = pd.to_numeric(col_series, errors="coerce").dropna()
             if len(num_series) > 0:
-                q1 = float(num_series.quantile(0.25))
-                q3 = float(num_series.quantile(0.75))
+                q1, q3 = float(num_series.quantile(0.25)), float(num_series.quantile(0.75))
                 iqr = q3 - q1
-                lower = q1 - 1.5 * iqr
-                upper = q3 + 1.5 * iqr
+                lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
                 outlier_mask = (num_series < lower) | (num_series > upper)
                 outlier_count = int(outlier_mask.sum())
                 numeric_stats = {
-                    "min": convert_numpy_types(num_series.min()),
-                    "q1": convert_numpy_types(q1),
-                    "median": convert_numpy_types(num_series.median()),
-                    "q3": convert_numpy_types(q3),
-                    "max": convert_numpy_types(num_series.max()),
-                    "mean": convert_numpy_types(num_series.mean()),
-                    "std": convert_numpy_types(num_series.std()),
-                    "iqr": convert_numpy_types(iqr),
+                    "min": float(num_series.min()),
+                    "q1": q1,
+                    "median": float(num_series.median()),
+                    "q3": q3,
+                    "max": float(num_series.max()),
+                    "mean": float(num_series.mean()),
+                    "std": float(num_series.std()),
+                    "iqr": iqr,
                     "outlier_count": outlier_count,
                 }
                 try:
-                    skew = convert_numpy_types(num_series.skew())
-                    kurt = convert_numpy_types(num_series.kurt())
+                    skew, kurt = float(num_series.skew()), float(num_series.kurt())
                 except Exception:
-                    skew = None
-                    kurt = None
+                    pass
                 zero_count = int((num_series == 0).sum())
 
         # datetime stats
@@ -289,18 +313,39 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10) -> dict:
                     "count_parsed": int(dt_series.shape[0]),
                 }
 
-        # entropy (categorical) — lower = more predictable
+        # entropy
         entropy = None
         if unique_count > 0 and unique_count < 5000 and top_values:
             counts = list(col_series.value_counts(dropna=True).values)
             probs = [c / sum(counts) for c in counts]
             entropy = float(round(-sum(p * math.log2(p) for p in probs if p > 0), 4))
 
-        # suggested actions (heuristics)
+        # correlation with target
+        correlation_with_target = None
+        if target_series is not None and col != target:
+            try:
+                if pd.api.types.is_numeric_dtype(target_series) and num_parsed_pct > 0.5:
+                    correlation_with_target = float(pd.to_numeric(col_series, errors="coerce").corr(target_series))
+                elif pd.api.types.is_numeric_dtype(target_series) and dt_parsed_pct > 0.5:
+                    correlation_with_target = float(parsed_dt.astype(np.int64).corr(target_series))
+            except Exception:
+                correlation_with_target = None
+
+        # cardinality classification
+        if unique_count == total_rows and total_rows > 1:
+            cardinality_type = "id"
+        elif unique_pct > 0.7:
+            cardinality_type = "high"
+        elif unique_pct < 0.05:
+            cardinality_type = "low"
+        else:
+            cardinality_type = "medium"
+
+        # suggestions
         suggestions = []
         if nulls / max(1, total_rows) > 0.5:
             suggestions.append("High missing rate (>50%): consider drop column or strong imputation.")
-        if unique_count == total_rows and total_rows > 1:
+        if cardinality_type == "id":
             suggestions.append("Looks like a unique identifier (candidate primary key).")
         if unique_count <= 1:
             suggestions.append("Constant column: likely safe to drop.")
@@ -309,37 +354,53 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10) -> dict:
         if has_separator:
             suggestions.append("Multi-select / delimiter detected: consider explode into multiple boolean columns.")
         if mixed_types:
-            suggestions.append("Mixed types detected (strings & numbers / etc): inspect parsing or coerce consistently.")
+            suggestions.append("Mixed types detected: inspect parsing or coerce consistently.")
         if unique_pct > 0.95 and unique_count > 50 and num_parsed_pct < 0.2:
             suggestions.append("High-cardinality categorical: consider hashing/embedding or keep as text.")
+        if skew and abs(skew) > 2:
+            suggestions.append("Highly skewed numeric: consider log-transform.")
+        if dt_stats and (dt_stats["min_date"] < "1900-01-01" or dt_stats["max_date"] > "2100-01-01"):
+            suggestions.append("Datetime range unusual: check parsing errors.")
 
-        columns[col] = convert_numpy_types({
+        # memory optimization suggestions
+        if pd.api.types.is_integer_dtype(col_series):
+            min_val, max_val = col_series.min(), col_series.max()
+            for t in [np.int8, np.int16, np.int32]:
+                if np.iinfo(t).min <= min_val <= max_val <= np.iinfo(t).max:
+                    suggestions.append(f"Downcast int64 → {t.__name__}")
+                    break
+        elif pd.api.types.is_float_dtype(col_series):
+            if col_series.astype(np.float32).equals(col_series.dropna()):
+                suggestions.append("Downcast float64 → float32")
+
+        columns[col] = {
             "name": col,
             "non_null": non_null,
             "nulls": nulls,
             "null_percent": round(nulls / max(1, total_rows), 4),
             "unique_count": unique_count,
             "unique_percent": unique_pct,
+            "cardinality_type": cardinality_type,
             "is_constant": unique_count <= 1,
-            "is_identifier_candidate": unique_count == total_rows and total_rows > 1,
             "mixed_types_sample": list(types_seen)[:5],
             "inferred_numeric_fraction": round(num_parsed_pct, 4),
             "inferred_datetime_fraction": round(dt_parsed_pct, 4),
             "multi_select_detected": has_separator,
-            "top_values": convert_numpy_types(top_values),
+            "top_values": top_values,
             "numeric_stats": numeric_stats,
             "numeric_skew": skew,
             "numeric_kurtosis": kurt,
             "zero_count": zero_count,
             "datetime_stats": dt_stats,
             "entropy": entropy,
-            "sample_values": convert_numpy_types(col_series.dropna().head(5).tolist()),
+            "correlation_with_target": correlation_with_target,
+            "sample_values": col_series.dropna().head(5).tolist(),
             "suggested_actions": suggestions
-        })
+        }
 
-    inspection = {
-        "head": convert_numpy_types(head),
-        "tail": convert_numpy_types(tail),
+    return {
+        "head": head,
+        "tail": tail,
         "shape": {"rows": int(total_rows), "columns": int(total_cols)},
         "dtypes": dtypes,
         "memory": {"per_column": memory_per_column, "total": memory_total},
@@ -347,7 +408,6 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10) -> dict:
         "duplicates": duplicates_summary,
         "columns": columns
     }
-    return inspection
 
 def clean_column_name(name: str) -> str:
     """Chuẩn hóa tên cột: viết thường, bỏ ký tự đặc biệt"""
@@ -667,11 +727,16 @@ def analyze_clustering(df, num_clusters=4):
     kmeans = KMeans(n_clusters=num_clusters, n_init="auto", random_state=42)
     labels = kmeans.fit_predict(X)
     score = silhouette_score(X, labels)
+    df_out = df.copy()
+    df_out["cluster"] = labels
     df["cluster"] = labels
     centers = pd.DataFrame(scaler.inverse_transform(kmeans.cluster_centers_), columns=num_cols.columns)
+    cluster_sizes = pd.Series(labels).value_counts().to_dict()
+    
     return {
-        "assignments": df[["cluster"]].to_dict(orient="records"),
+        "assignments": df_out[["cluster"]].to_dict(orient="records"),
         "centroids": centers.to_dict(orient="records"),
+        "cluster_sizes": cluster_sizes,
         "silhouette_score": score
     }
 
