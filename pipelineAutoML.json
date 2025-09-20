@@ -139,28 +139,14 @@
       "justification": {
         "rules": [
           {
-            "condition": "problem_type == 'regression' and n_features < 10 and dataset_size < 1000",
-            "selected_models": ["Ridge", "Lasso", "LinearRegression"],
-            "justification": "Dữ liệu nhỏ và số chiều thấp → Ưu tiên mô hình tuyến tính (Ridge/Lasso) vì chúng có regularization, giúp tránh overfit tốt hơn LinearRegression thuần túy."
-          },
-          {
-            "condition": "problem_type == 'regression' and n_features < 20 and dataset_size < 5000",
-            "selected_models": ["RandomForestRegressor", "SVR"],
-            "justification": "Dữ liệu vừa phải → Ưu tiên mô hình linh hoạt như Random Forest hoặc SVR để nắm bắt các mối quan hệ phi tuyến mà không cần quá nhiều dữ liệu."
-          },
-          {
-            "condition": "problem_type == 'regression' and n_features > 50 and dataset_size > 10000",
+            "condition": "problem_type == 'classification' and dataset_size < 1000 and n_features < 20",
             "selected_models": [
-              "XGBRegressor",
-              "LGBMRegressor",
-              "CatBoostRegressor"
+              "LogisticRegression",
+              "SVC",
+              "KNeighborsClassifier",
+              "DecisionTreeClassifier"
             ],
-            "justification": "Dữ liệu lớn và nhiều chiều → Ưu tiên mô hình gradient boosting (XGBoost, LightGBM, CatBoost) vì chúng xử lý tốt tương tác phức tạp giữa features, tốc độ nhanh và có sẵn cơ chế chống overfit."
-          },
-          {
-            "condition": "problem_type == 'classification' and dataset_size < 1000",
-            "selected_models": ["LogisticRegression", "SVC"],
-            "justification": "Dữ liệu nhỏ → Ưu tiên mô hình đơn giản, ít tham số như Logistic Regression hoặc SVM để tránh overfit. SVM đặc biệt mạnh với dữ liệu có biên rõ ràng."
+            "justification": "Dữ liệu nhỏ → ưu tiên mô hình đơn giản, ít tham số để tránh overfit (Logistic, SVM, KNN, Tree)."
           },
           {
             "condition": "problem_type == 'classification' and has_imbalanced_target == true",
@@ -169,62 +155,91 @@
               "LGBMClassifier",
               "CatBoostClassifier"
             ],
-            "justification": "Dữ liệu mất cân bằng → Ưu tiên mô hình tree-based (XGBoost, LightGBM, CatBoost) vì chúng có tham số `class_weight` hoặc `scale_pos_weight` để xử lý imbalance một cách tự nhiên."
+            "justification": "Dữ liệu mất cân bằng → tree-based boosting với class_weight/scale_pos_weight xử lý imbalance tốt."
           },
           {
-            "condition": "problem_type == 'classification' and interpretability_required == true",
-            "selected_models": ["LogisticRegression", "DecisionTreeClassifier"],
-            "justification": "Yêu cầu giải thích mô hình → Ưu tiên Logistic Regression (hệ số hồi quy) hoặc Decision Tree (luật if-then) vì chúng cung cấp kết quả dễ hiểu cho con người."
-          },
-          {
-            "condition": "problem_type == 'classification' and dataset_size > 10000 and n_features > 50",
+            "condition": "problem_type == 'classification' and dataset_size > 20000 and n_features > 100",
             "selected_models": [
+              "RandomForestClassifier",
               "XGBClassifier",
               "LGBMClassifier",
-              "RandomForestClassifier"
+              "MLPClassifier"
             ],
-            "justification": "Dữ liệu lớn và nhiều chiều → Ưu tiên mô hình ensemble mạnh (XGBoost, LightGBM, Random Forest) vì chúng có khả năng tổng quát hóa tốt và xử lý tốt nhiễu."
+            "justification": "Dữ liệu lớn và nhiều chiều → mô hình ensemble mạnh hoặc MLP để tổng quát hóa tốt."
           },
           {
-            "condition": "problem_type == 'time_series' and has_seasonality == true and dataset_size < 5000",
-            "selected_models": ["SARIMA", "Prophet", "ExponentialSmoothing"],
-            "justification": "Dữ liệu có tính mùa vụ rõ ràng và kích thước vừa phải → Ưu tiên mô hình thống kê (SARIMA, Prophet) vì chúng được thiết kế đặc biệt để mô hình hóa xu hướng và mùa vụ một cách chính xác."
-          },
-          {
-            "condition": "problem_type == 'time_series' and dataset_size > 5000 and has_lag_features == true",
+            "condition": "problem_type == 'regression' and dataset_size < 2000 and n_features < 20",
             "selected_models": [
-              "XGBRegressor (with lag features)",
-              "LGBMRegressor (with lag features)",
-              "LSTM"
+              "LinearRegression",
+              "Ridge",
+              "Lasso",
+              "ElasticNet",
+              "SVR"
             ],
-            "justification": "Dữ liệu chuỗi thời gian lớn và đã được chuyển thành features dạng bảng → Có thể sử dụng mô hình học máy mạnh (XGBoost, LightGBM) hoặc học sâu (LSTM) để nắm bắt các mối quan hệ phi tuyến phức tạp và phụ thuộc dài hạn."
+            "justification": "Regression dữ liệu nhỏ → mô hình tuyến tính có regularization hoặc SVR cho quan hệ phi tuyến nhẹ."
           },
           {
-            "condition": "problem_type == 'clustering' and n_features < 5",
+            "condition": "problem_type == 'regression' and dataset_size > 10000 and n_features > 50",
+            "selected_models": [
+              "XGBRegressor",
+              "LGBMRegressor",
+              "CatBoostRegressor",
+              "RandomForestRegressor"
+            ],
+            "justification": "Dữ liệu lớn và nhiều chiều → ưu tiên boosting & random forest cho tính linh hoạt và hiệu năng."
+          },
+          {
+            "condition": "problem_type == 'clustering' and n_features < 10",
             "selected_models": ["KMeans", "MiniBatchKMeans"],
-            "justification": "Số chiều thấp → KMeans và MiniBatchKMeans hoạt động rất hiệu quả, nhanh chóng và dễ hiểu. MiniBatchKMeans phù hợp nếu dữ liệu rất lớn."
+            "justification": "Dữ liệu low-dim → KMeans và MiniBatchKMeans nhanh và hiệu quả."
           },
           {
             "condition": "problem_type == 'clustering' and has_arbitrary_shapes == true",
-            "selected_models": ["DBSCAN", "HDBSCAN"],
-            "justification": "Dữ liệu có cụm hình dạng bất thường, không phải hình cầu → DBSCAN và HDBSCAN phù hợp vì chúng không giả định hình dạng cụm, có thể phát hiện cụm có mật độ khác nhau và cả điểm nhiễu (outliers)."
+            "selected_models": ["DBSCAN", "HDBSCAN", "OPTICS"],
+            "justification": "Cụm phức tạp, không hình cầu → density-based clustering (DBSCAN/HDBSCAN/OPTICS) phù hợp."
           },
           {
-            "condition": "problem_type == 'clustering' and dataset_size > 10000",
-            "selected_models": ["MiniBatchKMeans", "HDBSCAN"],
-            "justification": "Dữ liệu lớn → Ưu tiên MiniBatchKMeans (phiên bản nhanh của KMeans) hoặc HDBSCAN (xử lý tốt cụm có mật độ khác nhau) để đảm bảo hiệu năng tính toán."
+            "condition": "problem_type == 'time_series' and dataset_size < 5000 and has_seasonality == true",
+            "selected_models": [
+              "ARIMA",
+              "SARIMA",
+              "ExponentialSmoothing",
+              "Prophet"
+            ],
+            "justification": "Time series nhỏ, có seasonality → mô hình thống kê cổ điển/Prophet phù hợp."
           },
           {
-            "condition": "contains_text_features == true and deep_learning.enabled == true",
-            "selected_models": ["LSTM", "Transformer"],
-            "justification": "Dữ liệu có chứa văn bản → Ưu tiên mô hình học sâu (LSTM, Transformer) vì chúng có khả năng trích xuất đặc trưng ngữ nghĩa sâu, nắm bắt ngữ cảnh và thứ tự từ trong văn bản."
+            "condition": "problem_type == 'time_series' and dataset_size > 10000 and has_lag_features == true",
+            "selected_models": [
+              "XGBRegressor",
+              "LGBMRegressor",
+              "LSTM",
+              "GRU",
+              "TCN"
+            ],
+            "justification": "Time series lớn với lag features → ML boosting + deep learning sequence models (LSTM/GRU/TCN)."
           },
           {
-            "condition": "contains_categorical_features == true and n_unique_categories > 100",
-            "selected_models": ["CatBoost", "LightGBM"],
-            "justification": "Có biến phân loại với cardinality cao → Ưu tiên CatBoost hoặc LightGBM vì chúng có thể xử lý trực tiếp biến categorical mà không cần one-hot encoding, giúp tránh nổ chiều và mất mát thông tin."
+            "condition": "problem_type == 'text' and dataset_size < 5000",
+            "selected_models": [
+              "NaiveBayes",
+              "LogisticRegression",
+              "LinearSVC"
+            ],
+            "justification": "Text nhỏ → baseline nhanh, ít tham số (NB, Logistic, SVM)."
+          },
+          {
+            "condition": "problem_type == 'text' and dataset_size >= 5000",
+            "selected_models": [
+              "XGBClassifier",
+              "LGBMClassifier",
+              "CNN_Text",
+              "RNN_Text"
+            ],
+            "justification": "Text lớn → boosting và deep learning (CNN, RNN) để khai thác ngữ cảnh."
           }
-        ],
+        ]
+,
         "fallback": {
           "selected_models": ["KMeans"],
           "justification": "Không có điều kiện nào khớp → Sử dụng K-Means làm mô hình phân cụm mặc định vì nó đơn giản, nhanh và hoạt động tốt trên nhiều loại dữ liệu numeric. Nếu bài toán là supervised, hệ thống sẽ tự động chuyển sang RandomForest."
@@ -374,6 +389,11 @@
         "method": "gaussian_process_regression",
         "confidence_interval": 0.95,
         "description": "Ước lượng khoảng tin cậy cho dự đoán, dựa trên posterior distribution từ Bayesian Optimization."
+      },
+      "statistical_validation": {
+        "enabled": true,
+        "tests": ["wilcoxon", "mcnemar", "paired_t_test"],
+        "goal": "Chứng minh sự khác biệt giữa mô hình có ý nghĩa thống kê."
       }
     },
     "model_comparison": {
@@ -390,13 +410,31 @@
       "global": [
         "feature_importance",
         "permutation_importance",
-        "partial_dependence_plots"
+        "partial_dependence_plots",
+        "ice_plots"
       ],
       "local": ["shap", "lime"],
       "surrogate_models": ["decision_tree_surrogate", "linear_model_surrogate"]
     },
     "output_format": ["plots", "tables", "interactive_dashboards"],
     "target_audience": ["technical", "business_stakeholders"]
+  },
+  "error_analysis": {
+    "enabled": true,
+    "methods": [
+      "misclassification_analysis",
+      "residual_plots",
+      "fairness_bias_check"
+    ],
+    "fairness_dimensions": ["gender", "age", "region"]
+  },
+  "ablation_study": {
+    "enabled": true,
+    "strategies": [
+      "feature_ablation",
+      "module_ablation",
+      "robustness_test_with_noise"
+    ]
   },
   "model_improvement": {
     "strategies": [

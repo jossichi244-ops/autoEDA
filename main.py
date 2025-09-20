@@ -16,7 +16,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import chi2_contingency, f_oneway
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import root_mean_squared_error, silhouette_score
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.tsa.seasonal import seasonal_decompose
 from sklearn.ensemble import IsolationForest, RandomForestClassifier, RandomForestRegressor
@@ -1764,7 +1764,6 @@ from io import BytesIO
 import json
 from typing import Tuple, Dict, Any, List, Union
 from sklearn.model_selection import KFold, train_test_split, cross_val_score
-from sklearn.metrics import accuracy_score, mean_squared_error
 import joblib
 import optuna
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -1773,6 +1772,40 @@ from sklearn.svm import SVC, SVR
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from xgboost import XGBClassifier, XGBRegressor
 from sklearn.cluster import KMeans
+# === Scikit-learn ===
+from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, Lasso, ElasticNet, SGDClassifier
+from sklearn.svm import SVC, LinearSVC, SVR
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.ensemble import (
+    RandomForestClassifier, RandomForestRegressor,
+    ExtraTreesClassifier, ExtraTreesRegressor,
+    GradientBoostingClassifier, GradientBoostingRegressor,
+    AdaBoostClassifier, AdaBoostRegressor,
+    BaggingClassifier, BaggingRegressor
+)
+from sklearn.naive_bayes import GaussianNB, MultinomialNB
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+from sklearn.cluster import KMeans, MiniBatchKMeans, DBSCAN, AgglomerativeClustering, SpectralClustering, Birch, OPTICS
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score, mean_squared_error
+
+from xgboost import XGBClassifier, XGBRegressor
+from lightgbm import LGBMClassifier, LGBMRegressor
+from catboost import CatBoostClassifier, CatBoostRegressor
+
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from prophet import Prophet 
+# from tbats import TBATS, BATS, Theta  
+
+# import tensorflow as tf
+# from tensorflow.keras.models import Sequential
+# from tensorflow.keras.layers import Dense, SimpleRNN, LSTM, GRU, Input, Conv1D, GlobalMaxPooling1D, Embedding
+
+from tcn import TCN 
 
 
 # Load pipeline config 1 lần khi app start
@@ -2265,188 +2298,395 @@ def select_models_for_training(
 
 def production_phase_tuning(model_cls, X_train, y_train, problem_type, training_config):
     def objective(trial):
-        if problem_type == "classification":
-            n_estimators = trial.suggest_int("n_estimators", 50, 200)
-            max_depth = trial.suggest_int("max_depth", 3, 15)
-            model = model_cls(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
-            model.fit(X_train, y_train)
-            preds = model.predict(X_train)
-            return accuracy_score(y_train, preds)
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X_train, y_train, test_size=0.2, random_state=42,
+            stratify=y_train if problem_type == "classification" else None
+        )
 
+        params = {}
+        model_name = model_cls.__name__
+
+        # === Tree-based Models ===
+        if model_name in ["RandomForestClassifier", "RandomForestRegressor",
+                          "ExtraTreesClassifier", "ExtraTreesRegressor",
+                          "GradientBoostingClassifier", "GradientBoostingRegressor"]:
+            params = {
+                "n_estimators": trial.suggest_int("n_estimators", 50, 500),
+                "max_depth": trial.suggest_int("max_depth", 3, 20),
+                "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
+                "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
+                "random_state": 42
+            }
+
+        elif model_name in ["XGBClassifier", "XGBRegressor"]:
+            params = {
+                "n_estimators": trial.suggest_int("n_estimators", 100, 500),
+                "max_depth": trial.suggest_int("max_depth", 3, 12),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+                "random_state": 42
+            }
+
+        elif model_name in ["LGBMClassifier", "LGBMRegressor"]:
+            params = {
+                "n_estimators": trial.suggest_int("n_estimators", 100, 500),
+                "num_leaves": trial.suggest_int("num_leaves", 31, 255),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+                "random_state": 42
+            }
+
+        elif model_name in ["CatBoostClassifier", "CatBoostRegressor"]:
+            params = {
+                "iterations": trial.suggest_int("iterations", 200, 1000),
+                "depth": trial.suggest_int("depth", 4, 10),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+                "random_state": 42,
+                "verbose": False
+            }
+
+        # === Linear Models ===
+        elif model_name == "LogisticRegression":
+            params = {
+                "C": trial.suggest_float("C", 1e-3, 10, log=True),
+                "penalty": trial.suggest_categorical("penalty", ["l2", "elasticnet"]),
+                "solver": trial.suggest_categorical("solver", ["lbfgs", "saga"]),
+                "max_iter": 500
+            }
+
+        elif model_name in ["Ridge", "Lasso", "ElasticNet"]:
+            params = {
+                "alpha": trial.suggest_float("alpha", 1e-4, 10, log=True)
+            }
+            if model_name == "ElasticNet":
+                params["l1_ratio"] = trial.suggest_float("l1_ratio", 0.0, 1.0)
+
+        # === SVM ===
+        elif model_name in ["SVC", "SVR", "LinearSVC"]:
+            params = {
+                "C": trial.suggest_float("C", 1e-3, 10, log=True),
+                "kernel": trial.suggest_categorical("kernel", ["linear", "rbf", "poly"]),
+                "gamma": trial.suggest_categorical("gamma", ["scale", "auto"])
+            }
+
+        # === KNN ===
+        elif model_name in ["KNeighborsClassifier", "KNeighborsRegressor"]:
+            params = {
+                "n_neighbors": trial.suggest_int("n_neighbors", 3, 30),
+                "weights": trial.suggest_categorical("weights", ["uniform", "distance"]),
+                "metric": trial.suggest_categorical("metric", ["euclidean", "manhattan", "minkowski"])
+            }
+
+        # === MLP ===
+        elif model_name in ["MLPClassifier", "MLPRegressor"]:
+            params = {
+                "hidden_layer_sizes": trial.suggest_categorical(
+                    "hidden_layer_sizes", [(50,), (100,), (100, 50), (200, 100)]
+                ),
+                "activation": trial.suggest_categorical("activation", ["relu", "tanh"]),
+                "solver": trial.suggest_categorical("solver", ["adam", "sgd"]),
+                "learning_rate_init": trial.suggest_float("learning_rate_init", 1e-4, 1e-1, log=True),
+                "max_iter": 500,
+                "early_stopping": True
+            }
+
+        # === Clustering ===
+        elif model_name == "KMeans":
+            params = {
+                "n_clusters": trial.suggest_int("n_clusters", 2, 10),
+                "init": trial.suggest_categorical("init", ["k-means++", "random"]),
+                "n_init": 10,
+                "random_state": 42
+            }
+
+        elif model_name == "DBSCAN":
+            params = {
+                "eps": trial.suggest_float("eps", 0.1, 5.0),
+                "min_samples": trial.suggest_int("min_samples", 3, 20)
+            }
+
+        elif model_name == "GaussianMixture":
+            params = {
+                "n_components": trial.suggest_int("n_components", 2, 10),
+                "covariance_type": trial.suggest_categorical(
+                    "covariance_type", ["full", "tied", "diag", "spherical"]
+                ),
+                "random_state": 42
+            }
+
+        # === Time Series ===
+        elif model_name == "Prophet":
+            params = {
+                "seasonality_mode": trial.suggest_categorical("seasonality_mode", ["additive", "multiplicative"]),
+                "changepoint_prior_scale": trial.suggest_float("changepoint_prior_scale", 0.01, 0.5),
+                "seasonality_prior_scale": trial.suggest_float("seasonality_prior_scale", 1.0, 10.0)
+            }
+
+        elif model_name in ["ARIMA", "SARIMAX"]:
+            params = {
+                "order": (
+                    trial.suggest_int("p", 0, 5),
+                    trial.suggest_int("d", 0, 2),
+                    trial.suggest_int("q", 0, 5)
+                )
+            }
+
+        # Build model
+        model = model_cls(**params)
+        model.fit(X_tr, y_tr)
+
+        preds = model.predict(X_val)
+        if problem_type == "classification":
+            return accuracy_score(y_val, preds)
         elif problem_type == "regression":
-            n_estimators = trial.suggest_int("n_estimators", 50, 200)
-            max_depth = trial.suggest_int("max_depth", 3, 15)
-            model = model_cls(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
-            model.fit(X_train, y_train)
-            preds = model.predict(X_train)
-            return mean_squared_error(y_train, preds, squared=False)
+            return mean_squared_error(y_val, preds) ** 0.5
+        else:
+            return silhouette_score(X_val, preds) if hasattr(model, "labels_") else 0
 
     study = optuna.create_study(
         direction="maximize" if problem_type == "classification" else "minimize"
     )
-    study.optimize(objective, n_trials=30, timeout=training_config["training_config"]["max_runtime_minutes"] * 60)
+    study.optimize(objective, n_trials=30,
+                   timeout=training_config["training_config"]["max_runtime_minutes"] * 60)
 
     return study.best_params
 
-def get_model_instance(model_name: str, problem_type: str):
+def get_model_class(model_name: str, problem_type: str):
     """
-    Trả về instance model dựa vào tên và loại bài toán.
+    Trả về class model (chưa khởi tạo) dựa vào tên và loại bài toán.
+    Bao phủ hầu hết các mô hình ML phổ biến (trừ LLM).
     """
+    # === Classification ===
     if problem_type == "classification":
-        if model_name == "RandomForest":
-            return RandomForestClassifier()
-        elif model_name == "LogisticRegression":
-            return LogisticRegression(max_iter=1000)
-        elif model_name == "SVM":
-            return SVC()
-        elif model_name == "XGBoost":
-            return XGBClassifier(eval_metric="logloss", use_label_encoder=False)
-        elif model_name == "DecisionTree":
-            return DecisionTreeClassifier()
-    
+        classifiers = {
+            "LogisticRegression": LogisticRegression,
+            "SVC": SVC,
+            "LinearSVC": LinearSVC,
+            "KNeighborsClassifier": KNeighborsClassifier,
+            "DecisionTreeClassifier": DecisionTreeClassifier,
+            "RandomForestClassifier": RandomForestClassifier,
+            "ExtraTreesClassifier": ExtraTreesClassifier,
+            "GradientBoostingClassifier": GradientBoostingClassifier,
+            "XGBClassifier": XGBClassifier,
+            "LGBMClassifier": LGBMClassifier,
+            "CatBoostClassifier": CatBoostClassifier,
+            "RandomForest": RandomForestClassifier,
+            # "MLPClassifier": MLPClassifier,
+            "NaiveBayes": GaussianNB,
+            "QDA": QuadraticDiscriminantAnalysis,
+            "AdaBoostClassifier": AdaBoostClassifier,
+            "BaggingClassifier": BaggingClassifier
+        }
+        return classifiers.get(model_name)
+
+    # === Regression ===
     elif problem_type == "regression":
-        if model_name == "RandomForest":
-            return RandomForestRegressor()
-        elif model_name == "LinearRegression":
-            return LinearRegression()
-        elif model_name == "SVR":
-            return SVR()
-        elif model_name == "XGBoost":
-            return XGBRegressor()
-        elif model_name == "DecisionTree":
-            return DecisionTreeRegressor()
-    
+        regressors = {
+            "LinearRegression": LinearRegression,
+            "Ridge": Ridge,
+            "Lasso": Lasso,
+            "ElasticNet": ElasticNet,
+            "SVR": SVR,
+            "KNeighborsRegressor": KNeighborsRegressor,
+            "DecisionTreeRegressor": DecisionTreeRegressor,
+            "RandomForestRegressor": RandomForestRegressor,
+            "ExtraTreesRegressor": ExtraTreesRegressor,
+            "GradientBoostingRegressor": GradientBoostingRegressor,
+            "XGBRegressor": XGBRegressor,
+            "LGBMRegressor": LGBMRegressor,
+            "CatBoostRegressor": CatBoostRegressor,
+            "RandomForest": RandomForestRegressor,
+            # "MLPRegressor": MLPRegressor,
+            "AdaBoostRegressor": AdaBoostRegressor,
+            "BaggingRegressor": BaggingRegressor
+        }
+        return regressors.get(model_name)
+
+    # === Clustering ===
     elif problem_type == "clustering":
-        if model_name == "KMeans":
-            return KMeans(n_clusters=3, random_state=42)
-    
-    return None
+        clusterers = {
+            "KMeans": KMeans,
+            "MiniBatchKMeans": MiniBatchKMeans,
+            "DBSCAN": DBSCAN,
+            # "HDBSCAN": HDBSCAN,
+            "AgglomerativeClustering": AgglomerativeClustering,
+            # "GaussianMixture": GaussianMixture,
+            "SpectralClustering": SpectralClustering,
+            "Birch": Birch,
+            "OPTICS": OPTICS
+        }
+        return clusterers.get(model_name)
 
-def get_model_class(model_name, problem_type):
-    """
-    Trả về class model (chưa khởi tạo) để Optuna tạo instance với params.
-    """
-    if problem_type == "classification":
-        if model_name == "RandomForest":
-            return RandomForestClassifier
-        elif model_name == "LogisticRegression":
-            return LogisticRegression
-        elif model_name == "XGBoost":
-            return XGBClassifier
-    elif problem_type == "regression":
-        if model_name == "RandomForest":
-            return RandomForestRegressor
-        elif model_name == "LinearRegression":
-            return LinearRegression
-        elif model_name == "XGBoost":
-            return XGBRegressor
-    return None
+    # === Time Series Forecasting ===
+    elif problem_type == "time_series":
+        ts_models = {
+            "ARIMA": ARIMA,
+            "SARIMA": SARIMAX,
+            "ExponentialSmoothing": ExponentialSmoothing,
+            "Prophet": Prophet,
+            # "Theta": Theta,
+            "XGBRegressor": XGBRegressor,  # with lag features
+            "LGBMRegressor": LGBMRegressor,
+            "CatBoostRegressor": CatBoostRegressor,
+            # "RNN": SimpleRNN,
+            # "LSTM": LSTM,
+            # "GRU": GRU,
+            # "TCN": TemporalConvNet
+        }
+        return ts_models.get(model_name)
 
+    # === Text-specific Models (shallow ML, không phải LLM) ===
+    elif problem_type == "text":
+        text_models = {
+            "LogisticRegression": LogisticRegression,  # baseline for text classification
+            "LinearSVC": LinearSVC,
+            "NaiveBayes": MultinomialNB,
+            "SGDClassifier": SGDClassifier,
+            "XGBClassifier": XGBClassifier,
+            "LGBMClassifier": LGBMClassifier,
+            # "CNN_Text": TextCNN,
+            # "RNN_Text": LSTM
+        }
+        return text_models.get(model_name)
+
+    return None
 def train_models(df, model_selection_log, training_config):
-    """
-    Production training: tune bằng Optuna, train final model, evaluate test_score, lưu model.
-    """
-    target_col = model_selection_log["target_col"]
-    problem_type = model_selection_log["problem_type"]
-    model_candidates = model_selection_log["selected_models"]
+    target_col = model_selection_log.get("target_col")
+    problem_type = model_selection_log.get("problem_type")
+    model_candidates = model_selection_log.get("selected_models", [])
 
-    X = df.drop(columns=target_col)
-    y = df[target_col]
+    if target_col and target_col in df.columns:
+        X = df.drop(columns=target_col)
+        y = df[target_col]
+    else:
+        # Clustering không có target
+        X, y = df, None
 
-    split_cfg = training_config["train_test_split"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
-        test_size=split_cfg["test_size"],
-        random_state=split_cfg["random_state"],
-        stratify=y if problem_type == "classification" else None
-    )
+    split_cfg = training_config.get("train_test_split", {})
+    if problem_type != "clustering" and target_col:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y,
+            test_size=split_cfg.get("test_size", 0.2),
+            random_state=split_cfg.get("random_state", 42),
+            stratify=y if problem_type == "classification" else None
+        )
+    else:
+        X_train, X_test, y_train, y_test = X, None, y, None
 
     results = {}
     for model_name in model_candidates:
-        print(f"⚡ Training with Optuna: {model_name}")
-
-        model_cls = get_model_class(model_name, problem_type)  # return class, not instance
+        print(f"Training with Optuna: {model_name}")
+        model_cls = get_model_class(model_name, problem_type)
         if not model_cls:
             print(f"⚠️ Model {model_name} chưa được hỗ trợ")
             continue
 
         # Optuna tuning
-        best_params = production_phase_tuning(model_cls, X_train, y_train, problem_type, training_config)
+        best_params = {}
+        if problem_type in ["classification", "regression"]:
+            try:
+                best_params = production_phase_tuning(
+                    model_cls, X_train, y_train, problem_type, training_config
+                )
+            except Exception as e:
+                print(f"⚠️ Optuna tuning failed for {model_name}: {e}")
 
-        # Train final model with best params
-        model = model_cls(**best_params)
-        model.fit(X_train, y_train)
+        # Train final model
+        try:
+            model = model_cls(**best_params)
+        except TypeError:
+            model = model_cls()
+
+        try:
+            if problem_type != "clustering":
+                model.fit(X_train, y_train)
+            else:
+                model.fit(X)
+        except Exception as e:
+            print(f"⚠️ Training failed for {model_name}: {e}")
+            continue
 
         # Evaluate test_score
-        preds = model.predict(X_test)
-        if problem_type == "classification":
-            test_score = accuracy_score(y_test, preds)
-        elif problem_type == "regression":
-            test_score = mean_squared_error(y_test, preds, squared=False)
-        else:
-            # Với clustering: không có y_true cho test, tạm để None
+        test_score, preds = None, None
+        try:
+            if problem_type == "classification":
+                preds = model.predict(X_test)
+                test_score = accuracy_score(y_test, preds)
+
+            elif problem_type == "regression":
+                preds = model.predict(X_test)
+                test_score = root_mean_squared_error(y_test, preds)
+
+            elif problem_type == "clustering":
+                if hasattr(model, "labels_"):
+                    preds = model.labels_
+                    if X.shape[0] > 1 and X.shape[0] > X.shape[1]:
+                        test_score = silhouette_score(X, preds)
+
+            elif problem_type == "time_series":
+                if X_test is not None:
+                    preds = model.predict(len(X_test))
+                    test_score = mean_squared_error(y_test, preds) ** 0.5
+
+            elif problem_type == "text":
+                preds = model.predict(X_test)
+                test_score = f1_score(y_test, preds, average="weighted")
+        except Exception as e:
+            print(f"⚠️ Evaluation failed for {model_name}: {e}")
             test_score = None
 
         # Save model
         os.makedirs("models", exist_ok=True)
         model_path = f"models/{model_name}.joblib"
-        joblib.dump(model, model_path)
+        try:
+            joblib.dump(model, model_path)
+        except Exception as e:
+            print(f"⚠️ Saving model {model_name} failed: {e}")
 
         results[model_name] = {
             "best_params": best_params,
             "model_path": model_path,
-            "test_score": test_score
+            "test_score": test_score,
+            "preds": preds.tolist() if preds is not None else None
         }
 
     return results
 
+
 def model_comparison(results: Dict[str, Any], model_selection_log: Dict[str, Any], training_config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    So sánh các model đã huấn luyện, chọn ra model tốt nhất và sinh giải thích.
-    """
-    problem_type = model_selection_log["problem_type"]
+    problem_type = model_selection_log.get("problem_type")
+    selection_metric = training_config.get("model_comparison", {}).get("selection_metric", "auto")
 
-    # chọn metric
-    if training_config["model_comparison"]["selection_metric"] == "auto":
-        metric = "accuracy" if problem_type == "classification" else "rmse"
-    else:
-        metric = training_config["model_comparison"]["selection_metric"]
+    metric = "accuracy" if (selection_metric == "auto" and problem_type == "classification") else "rmse"
 
-    # chọn best model
+    # Lọc ra những model có test_score hợp lệ
+    valid_results = {m: r for m, r in results.items() if r.get("test_score") is not None}
+    if not valid_results:
+        raise ValueError("No valid models with test_score found. Check training pipeline.")
+
     if problem_type == "classification":
-        best_model = max(results, key=lambda m: results[m]["test_score"])
+        best_model = max(valid_results, key=lambda m: valid_results[m]["test_score"])
     else:
-        best_model = min(results, key=lambda m: results[m]["test_score"])
+        best_model = min(valid_results, key=lambda m: valid_results[m]["test_score"])
 
-    best_score = results[best_model]["test_score"]
-
-    # Wilcoxon test
-    p_value = None
-    if len(results) > 1 and training_config["model_comparison"]["enabled"]:
-        from scipy.stats import wilcoxon
-        best_scores = results[best_model]["cv_scores"]
-        for m, r in results.items():
-            if m == best_model:
-                continue
-            if len(best_scores) == len(r["cv_scores"]):
-                _, p_value = wilcoxon(best_scores, r["cv_scores"])
-                if p_value < training_config["model_comparison"]["alpha"]:
-                    break
+    best_score = valid_results[best_model]["test_score"]
 
     # Explanation
-    explanation_cfg = training_config["model_comparison"]["explanation_template"]
-    explanation = explanation_cfg["winning_model"].format(
+    explanation_cfg = training_config.get("model_comparison", {}).get("explanation_template", {})
+    explanation = explanation_cfg.get("winning_model", "{model_name} wins with {metric_name}={score}").format(
         model_name=best_model,
         metric_name=metric,
         score=best_score,
-        alpha=training_config["model_comparison"]["alpha"]
+        alpha=training_config.get("model_comparison", {}).get("alpha", 0.05)
     )
-    justification = model_selection_log["justification"]
+    justification = model_selection_log.get("justification", "")
 
     return {
         "best_model": best_model,
         "best_score": best_score,
-        "p_value": p_value,
+        "p_value": None,  # Wilcoxon bỏ qua tạm
         "explanation": f"{explanation}\n→ {justification}"
     }
 
