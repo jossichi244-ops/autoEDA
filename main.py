@@ -1762,7 +1762,11 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 import pandas as pd
 from io import BytesIO
 import json
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List, Union
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import accuracy_score, mean_squared_error
+import joblib
+import optuna
 
 # Load pipeline config 1 lần khi app start
 with open("pipelineAutoML.json", "r") as f:
@@ -1912,8 +1916,19 @@ def preprocess_data(
             
         # --- Time series ---
         elif dtype == "time_series":
-            # Tuỳ theo config, ở đây mình chưa làm gì
-            log[col].append("time_series: no preprocessing applied")
+            # Convert datetime if not already
+            df_processed[col] = pd.to_datetime(df_processed[col], errors="coerce", utc=True)
+            log[col].append("converted to datetime")
+
+            # Extract useful features
+            df_processed[f"{col}_year"] = df_processed[col].dt.year
+            df_processed[f"{col}_month"] = df_processed[col].dt.month
+            df_processed[f"{col}_day"] = df_processed[col].dt.day
+            df_processed[f"{col}_dayofweek"] = df_processed[col].dt.dayofweek
+
+            # Drop raw datetime col (vì sklearn không hiểu được)
+            df_processed = df_processed.drop(columns=[col])
+            log[col].append("extracted year, month, day, dayofweek")
 
     return df_processed, log, updated_types
 
@@ -1939,13 +1954,40 @@ async def predict_from_df(df: pd.DataFrame, target_col: str = None):
     model_selection_log = select_models_for_training(
         df_fs, updated_types, pipeline_config["model_selection"], target_col=target_col
     )
-    
+
+    training_results = []
+    # for sel in model_selection_log:   
+    #     res = train_models(
+    #         df_fs,
+    #         target_col=sel["target_col"],
+    #         model_candidates=sel["selected_models"],
+    #         training_config=pipeline_config["model_training"],
+    #         problem_type=sel["problem_type"]
+    #     )
+    #     training_results.append({
+    #         "target_col": sel["target_col"],
+    #         "problem_type": sel["problem_type"],
+    #         "results": res
+    #     })
+    res = train_models(
+        df_fs,
+        model_selection_log=model_selection_log,
+        training_config=pipeline_config["model_training"]
+    )
+
+    training_results = [{
+        "target_col": model_selection_log["target_col"],
+        "problem_type": model_selection_log["problem_type"],
+        "results": res
+    }]
+
     return {
         "detected_types": updated_types,  
         "preprocessing_log": preprocessing_log,
         "feature_engineering_log": fe_log,
         "feature_selection_log": fs_log,
         "model_selection_log": model_selection_log,
+        "training_results": training_results,
         "processed_data_preview": df_fs.head(5).to_dict(orient="records"),
     }
 
@@ -2131,9 +2173,7 @@ def select_models_for_training(
     model_config: Dict[str, Any],
     target_col: str = None
 ) -> Dict[str, Any]:
-    """
-    Chọn mô hình ML dựa vào target_col, kiểu dữ liệu, context và rule-based config.
-    """
+
     if not target_col:
         target_col = auto_detect_target(df, detected_types)
     # --- 1. Xác định loại bài toán ---
@@ -2220,11 +2260,99 @@ def select_models_for_training(
             justification = "Fallback default model."
 
     return {
+        "target_col": target_col, 
         "problem_type": problem_type,
         "selected_models": selected_models,
         "justification": justification,
         "context": context
     }
+
+def train_models(
+    df: pd.DataFrame,
+    model_selection_log: Dict[str, Any],
+    training_config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Train và evaluate models dựa theo kết quả select_models_for_training + training_config.
+    """
+    target_col = model_selection_log["target_col"]
+    problem_type = model_selection_log["problem_type"]
+    model_candidates = model_selection_log["selected_models"]
+    context = model_selection_log["context"]
+
+    results = {}
+    X = df.drop(columns=target_col)
+    y = df[target_col]
+
+    # --- Train/test split ---
+    split_cfg = training_config["train_test_split"]
+    stratify = y if split_cfg.get("stratify", False) and problem_type == "classification" else None
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=split_cfg["test_size"],
+        random_state=split_cfg["random_state"],
+        stratify=stratify
+    )
+
+    for model_name in model_candidates:
+        print(f"Training model: {model_name}")
+
+        # Khởi tạo baseline model (sau này mở rộng theo context)
+        if model_name == "RandomForestClassifier":
+            from sklearn.ensemble import RandomForestClassifier
+            model = RandomForestClassifier(random_state=42)
+        elif model_name == "RandomForestRegressor":
+            from sklearn.ensemble import RandomForestRegressor
+            model = RandomForestRegressor(random_state=42)
+        elif model_name == "KMeans":
+            from sklearn.cluster import KMeans
+            model = KMeans(n_clusters=3, random_state=42)
+        else:
+            print(f"⚠️ Model {model_name} chưa được hỗ trợ")
+            continue  
+
+        # --- Hyperparameter tuning  ---
+        best_params = {}
+        if training_config["hyperparameter_tuning"]["enabled"]:
+            def objective(trial):
+                if model_name.startswith("RandomForest"):
+                    n_estimators = trial.suggest_int("n_estimators", 50, 200)
+                    max_depth = trial.suggest_int("max_depth", 3, 15)
+                    model.set_params(n_estimators=n_estimators, max_depth=max_depth)
+                model.fit(X_train, y_train)
+                preds = model.predict(X_test)
+                if problem_type == "classification":
+                    return 1 - accuracy_score(y_test, preds)  # minimize error
+                else:
+                    return mean_squared_error(y_test, preds)
+
+            study = optuna.create_study(direction="minimize")
+            study.optimize(objective, n_trials=10)
+            best_params = study.best_params
+            model.set_params(**best_params)
+
+        # --- Train final model ---
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+
+        if problem_type == "classification":
+            score = accuracy_score(y_test, preds)
+        else:
+            score = mean_squared_error(y_test, preds, squared=False)  # RMSE
+
+        # --- Save model ---
+        os.makedirs("models", exist_ok=True)
+        model_path = f"models/{model_name}.joblib"
+        joblib.dump(model, model_path)
+
+        results[model_name] = {
+            "score": score,
+            "best_params": best_params,
+            "model_path": model_path,
+            "context_used": context  
+        }
+
+    return results
 
 @app.post("/api/prediction")
 async def run_prediction(file: UploadFile = File(...), target: str = Form(None)):
