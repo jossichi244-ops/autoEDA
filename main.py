@@ -1763,10 +1763,17 @@ import pandas as pd
 from io import BytesIO
 import json
 from typing import Tuple, Dict, Any, List, Union
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import KFold, train_test_split, cross_val_score
 from sklearn.metrics import accuracy_score, mean_squared_error
 import joblib
 import optuna
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.svm import SVC, SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from xgboost import XGBClassifier, XGBRegressor
+from sklearn.cluster import KMeans
+
 
 # Load pipeline config 1 lần khi app start
 with open("pipelineAutoML.json", "r") as f:
@@ -1932,45 +1939,43 @@ def preprocess_data(
 
     return df_processed, log, updated_types
 
-async def predict_from_df(df: pd.DataFrame, target_col: str = None):
+async def predict_from_df(df: pd.DataFrame, target_col: str = None) -> Dict[str, Any]:
     print("Received data for prediction")
+
+    # --- Step 1: Detect types ---
     detected_types = detect_data_types(df, pipeline_config["data_type_detection"])
 
+    # --- Step 2: Preprocessing ---
     df_processed, preprocessing_log, updated_types = preprocess_data(
         df, detected_types, pipeline_config["preprocessing"]
     )
 
-    # Feature engineering
+    # --- Step 3: Feature engineering ---
     df_fe, fe_log = feature_engineering(
         df_processed, updated_types, pipeline_config["feature_engineering"]
     )
-    
-    # Feature selection
+
+    # --- Step 4: Feature selection ---
     df_fs, fs_log = feature_selection(
         df_fe, updated_types, pipeline_config["feature_selection"], target_col=target_col
     )
-    
-    # Model selection
+
+    # --- Step 5: Model selection ---
     model_selection_log = select_models_for_training(
         df_fs, updated_types, pipeline_config["model_selection"], target_col=target_col
     )
 
+    # --- Step 6: Model training ---
     training_results = []
-    # for sel in model_selection_log:   
-    #     res = train_models(
-    #         df_fs,
-    #         target_col=sel["target_col"],
-    #         model_candidates=sel["selected_models"],
-    #         training_config=pipeline_config["model_training"],
-    #         problem_type=sel["problem_type"]
-    #     )
-    #     training_results.append({
-    #         "target_col": sel["target_col"],
-    #         "problem_type": sel["problem_type"],
-    #         "results": res
-    #     })
     res = train_models(
         df_fs,
+        model_selection_log=model_selection_log,
+        training_config=pipeline_config["model_training"]
+    )
+
+    # --- Step 7: Model comparison ---
+    comparison = model_comparison(
+        res,
         model_selection_log=model_selection_log,
         training_config=pipeline_config["model_training"]
     )
@@ -1978,11 +1983,13 @@ async def predict_from_df(df: pd.DataFrame, target_col: str = None):
     training_results = [{
         "target_col": model_selection_log["target_col"],
         "problem_type": model_selection_log["problem_type"],
-        "results": res
+        "results": res,
+        "comparison": comparison
     }]
 
+    # --- Final output ---
     return {
-        "detected_types": updated_types,  
+        "detected_types": updated_types,
         "preprocessing_log": preprocessing_log,
         "feature_engineering_log": fe_log,
         "feature_selection_log": fs_log,
@@ -2173,9 +2180,10 @@ def select_models_for_training(
     model_config: Dict[str, Any],
     target_col: str = None
 ) -> Dict[str, Any]:
-
+    
     if not target_col:
         target_col = auto_detect_target(df, detected_types)
+
     # --- 1. Xác định loại bài toán ---
     if target_col and target_col in df.columns:
         y = df[target_col]
@@ -2219,140 +2227,228 @@ def select_models_for_training(
 
     # --- 4. Rule-based auto-select ---
     selected_models, justification = None, None
-    if model_config.get("auto_select", {}).get("enabled", False):
-        for rule in model_config["auto_select"]["justification"]["rules"]:
+    auto_select_cfg = model_config.get("model_selection", {}).get("auto_select", {})
+    justification_cfg = auto_select_cfg.get("justification", {})
+
+    if auto_select_cfg.get("enabled", False):
+        rules = justification_cfg.get("rules", [])
+        for rule in rules:
             try:
                 safe_globals = {
                     "__builtins__": {},
-                    "true": True,
-                    "false": False,
-                    "True": True,
-                    "False": False
+                    "true": True, "false": False, "True": True, "False": False
                 }
-
-                try:
-                    if eval(rule["condition"], safe_globals, context):
-                        selected_models = rule["selected_models"]
-                        justification = rule["justification"]
-                        break
-                except Exception as e:
-                    print(f"⚠️ Rule eval error: {rule['condition']} → {e}")
-                    continue
+                if eval(rule["condition"], safe_globals, context):
+                    selected_models = rule.get("selected_models", ["RandomForest"])
+                    justification = rule.get("justification", "Rule-based selection.")
+                    break
             except Exception as e:
-                print(f"⚠️ Rule eval error: {rule['condition']} → {e}")
+                print(f"⚠️ Rule eval error: {rule.get('condition')} → {e}")
                 continue
 
     # --- 5. Fallback ---
     if not selected_models:
-        fallback = model_config["auto_select"]["justification"]["fallback"]
-
-        if problem_type == "clustering":
-            selected_models = ["KMeans"]
-            justification = "Không có target → Clustering fallback chọn KMeans."
-        elif problem_type == "regression":
-            selected_models = fallback.get("regression", ["RandomForestRegressor"])
-            justification = "Fallback regression."
-        elif problem_type == "classification":
-            selected_models = fallback.get("classification", ["RandomForestClassifier"])
-            justification = "Fallback classification."
-        else:
-            selected_models = fallback.get("default", ["RandomForest"])
-            justification = "Fallback default model."
+        fallback = justification_cfg.get(
+            "fallback",
+            {"selected_models": ["RandomForest"], "justification": "Fallback default model."}
+        )
+        selected_models = fallback.get("selected_models", ["RandomForest"])
+        justification = fallback.get("justification", "Fallback default model.")
 
     return {
-        "target_col": target_col, 
+        "target_col": target_col,
         "problem_type": problem_type,
         "selected_models": selected_models,
         "justification": justification,
         "context": context
     }
 
-def train_models(
-    df: pd.DataFrame,
-    model_selection_log: Dict[str, Any],
-    training_config: Dict[str, Any]
-) -> Dict[str, Any]:
+def production_phase_tuning(model_cls, X_train, y_train, problem_type, training_config):
+    def objective(trial):
+        if problem_type == "classification":
+            n_estimators = trial.suggest_int("n_estimators", 50, 200)
+            max_depth = trial.suggest_int("max_depth", 3, 15)
+            model = model_cls(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_train)
+            return accuracy_score(y_train, preds)
+
+        elif problem_type == "regression":
+            n_estimators = trial.suggest_int("n_estimators", 50, 200)
+            max_depth = trial.suggest_int("max_depth", 3, 15)
+            model = model_cls(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_train)
+            return mean_squared_error(y_train, preds, squared=False)
+
+    study = optuna.create_study(
+        direction="maximize" if problem_type == "classification" else "minimize"
+    )
+    study.optimize(objective, n_trials=30, timeout=training_config["training_config"]["max_runtime_minutes"] * 60)
+
+    return study.best_params
+
+def get_model_instance(model_name: str, problem_type: str):
     """
-    Train và evaluate models dựa theo kết quả select_models_for_training + training_config.
+    Trả về instance model dựa vào tên và loại bài toán.
+    """
+    if problem_type == "classification":
+        if model_name == "RandomForest":
+            return RandomForestClassifier()
+        elif model_name == "LogisticRegression":
+            return LogisticRegression(max_iter=1000)
+        elif model_name == "SVM":
+            return SVC()
+        elif model_name == "XGBoost":
+            return XGBClassifier(eval_metric="logloss", use_label_encoder=False)
+        elif model_name == "DecisionTree":
+            return DecisionTreeClassifier()
+    
+    elif problem_type == "regression":
+        if model_name == "RandomForest":
+            return RandomForestRegressor()
+        elif model_name == "LinearRegression":
+            return LinearRegression()
+        elif model_name == "SVR":
+            return SVR()
+        elif model_name == "XGBoost":
+            return XGBRegressor()
+        elif model_name == "DecisionTree":
+            return DecisionTreeRegressor()
+    
+    elif problem_type == "clustering":
+        if model_name == "KMeans":
+            return KMeans(n_clusters=3, random_state=42)
+    
+    return None
+
+def get_model_class(model_name, problem_type):
+    """
+    Trả về class model (chưa khởi tạo) để Optuna tạo instance với params.
+    """
+    if problem_type == "classification":
+        if model_name == "RandomForest":
+            return RandomForestClassifier
+        elif model_name == "LogisticRegression":
+            return LogisticRegression
+        elif model_name == "XGBoost":
+            return XGBClassifier
+    elif problem_type == "regression":
+        if model_name == "RandomForest":
+            return RandomForestRegressor
+        elif model_name == "LinearRegression":
+            return LinearRegression
+        elif model_name == "XGBoost":
+            return XGBRegressor
+    return None
+
+def train_models(df, model_selection_log, training_config):
+    """
+    Production training: tune bằng Optuna, train final model, evaluate test_score, lưu model.
     """
     target_col = model_selection_log["target_col"]
     problem_type = model_selection_log["problem_type"]
     model_candidates = model_selection_log["selected_models"]
-    context = model_selection_log["context"]
 
-    results = {}
     X = df.drop(columns=target_col)
     y = df[target_col]
 
-    # --- Train/test split ---
     split_cfg = training_config["train_test_split"]
-    stratify = y if split_cfg.get("stratify", False) and problem_type == "classification" else None
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         test_size=split_cfg["test_size"],
         random_state=split_cfg["random_state"],
-        stratify=stratify
+        stratify=y if problem_type == "classification" else None
     )
 
+    results = {}
     for model_name in model_candidates:
-        print(f"Training model: {model_name}")
+        print(f"⚡ Training with Optuna: {model_name}")
 
-        # Khởi tạo baseline model (sau này mở rộng theo context)
-        if model_name == "RandomForestClassifier":
-            from sklearn.ensemble import RandomForestClassifier
-            model = RandomForestClassifier(random_state=42)
-        elif model_name == "RandomForestRegressor":
-            from sklearn.ensemble import RandomForestRegressor
-            model = RandomForestRegressor(random_state=42)
-        elif model_name == "KMeans":
-            from sklearn.cluster import KMeans
-            model = KMeans(n_clusters=3, random_state=42)
-        else:
+        model_cls = get_model_class(model_name, problem_type)  # return class, not instance
+        if not model_cls:
             print(f"⚠️ Model {model_name} chưa được hỗ trợ")
-            continue  
+            continue
 
-        # --- Hyperparameter tuning  ---
-        best_params = {}
-        if training_config["hyperparameter_tuning"]["enabled"]:
-            def objective(trial):
-                if model_name.startswith("RandomForest"):
-                    n_estimators = trial.suggest_int("n_estimators", 50, 200)
-                    max_depth = trial.suggest_int("max_depth", 3, 15)
-                    model.set_params(n_estimators=n_estimators, max_depth=max_depth)
-                model.fit(X_train, y_train)
-                preds = model.predict(X_test)
-                if problem_type == "classification":
-                    return 1 - accuracy_score(y_test, preds)  # minimize error
-                else:
-                    return mean_squared_error(y_test, preds)
+        # Optuna tuning
+        best_params = production_phase_tuning(model_cls, X_train, y_train, problem_type, training_config)
 
-            study = optuna.create_study(direction="minimize")
-            study.optimize(objective, n_trials=10)
-            best_params = study.best_params
-            model.set_params(**best_params)
-
-        # --- Train final model ---
+        # Train final model with best params
+        model = model_cls(**best_params)
         model.fit(X_train, y_train)
+
+        # Evaluate test_score
         preds = model.predict(X_test)
-
         if problem_type == "classification":
-            score = accuracy_score(y_test, preds)
+            test_score = accuracy_score(y_test, preds)
+        elif problem_type == "regression":
+            test_score = mean_squared_error(y_test, preds, squared=False)
         else:
-            score = mean_squared_error(y_test, preds, squared=False)  # RMSE
+            # Với clustering: không có y_true cho test, tạm để None
+            test_score = None
 
-        # --- Save model ---
+        # Save model
         os.makedirs("models", exist_ok=True)
         model_path = f"models/{model_name}.joblib"
         joblib.dump(model, model_path)
 
         results[model_name] = {
-            "score": score,
             "best_params": best_params,
             "model_path": model_path,
-            "context_used": context  
+            "test_score": test_score
         }
 
     return results
+
+def model_comparison(results: Dict[str, Any], model_selection_log: Dict[str, Any], training_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    So sánh các model đã huấn luyện, chọn ra model tốt nhất và sinh giải thích.
+    """
+    problem_type = model_selection_log["problem_type"]
+
+    # chọn metric
+    if training_config["model_comparison"]["selection_metric"] == "auto":
+        metric = "accuracy" if problem_type == "classification" else "rmse"
+    else:
+        metric = training_config["model_comparison"]["selection_metric"]
+
+    # chọn best model
+    if problem_type == "classification":
+        best_model = max(results, key=lambda m: results[m]["test_score"])
+    else:
+        best_model = min(results, key=lambda m: results[m]["test_score"])
+
+    best_score = results[best_model]["test_score"]
+
+    # Wilcoxon test
+    p_value = None
+    if len(results) > 1 and training_config["model_comparison"]["enabled"]:
+        from scipy.stats import wilcoxon
+        best_scores = results[best_model]["cv_scores"]
+        for m, r in results.items():
+            if m == best_model:
+                continue
+            if len(best_scores) == len(r["cv_scores"]):
+                _, p_value = wilcoxon(best_scores, r["cv_scores"])
+                if p_value < training_config["model_comparison"]["alpha"]:
+                    break
+
+    # Explanation
+    explanation_cfg = training_config["model_comparison"]["explanation_template"]
+    explanation = explanation_cfg["winning_model"].format(
+        model_name=best_model,
+        metric_name=metric,
+        score=best_score,
+        alpha=training_config["model_comparison"]["alpha"]
+    )
+    justification = model_selection_log["justification"]
+
+    return {
+        "best_model": best_model,
+        "best_score": best_score,
+        "p_value": p_value,
+        "explanation": f"{explanation}\n→ {justification}"
+    }
 
 @app.post("/api/prediction")
 async def run_prediction(file: UploadFile = File(...), target: str = Form(None)):

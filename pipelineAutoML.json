@@ -304,6 +304,28 @@
       "use_gpu": true,
       "verbose": true,
       "final_fit_on_full_data": true
+    },
+
+    "model_comparison": {
+      "enabled": true,
+      "strategy": "statistical_significance_test",
+      "test": "wilcoxon_signed_rank_test",
+      "alpha": 0.05,
+      "selection_metric": "auto",
+      "output_best_model": true,
+      "generate_explanation": true,
+      "explanation_template": {
+        "winning_model": "Mô hình {model_name} đạt điểm {metric_name} = {score:.4f}, cao hơn đáng kể so với các mô hình khác (p-value < {alpha}).",
+        "why_better": "→ {model_name} vượt trội vì: {justification}.",
+        "tradeoff_note": "📌 Lưu ý trade-off: {model_name} có thể chậm hơn {faster_model} hoặc khó giải thích hơn {interpretable_model}.",
+        "business_impact": "💡 Ứng dụng kinh doanh: {model_name} giúp {business_impact} — phù hợp với mục tiêu {business_goal}."
+      },
+      "business_goals": {
+        "default": "tối ưu hóa độ chính xác dự báo",
+        "interpretability": "giải thích được quyết định mô hình",
+        "speed": "dự báo nhanh, real-time",
+        "cost": "giảm chi phí vận hành"
+      }
     }
   },
   "model_evaluation": {
