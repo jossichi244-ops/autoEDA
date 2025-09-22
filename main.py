@@ -104,14 +104,12 @@ async def parse_file(file: UploadFile = File(...)):
 
     insights = extract_eda_insights(result)
 
-    # ✅ THÊM insights VÀO result
     result["insights"] = insights
     
     business_report = generate_business_report(result)
 
     result["business_report"] = business_report
 
-    # ✅ In sau khi đã có result
     print("All columns:", df.columns.tolist())
     print("Numeric cols:", list(descriptive["numeric"].keys()))
     print("Categorical cols:", list(descriptive["categorical"].keys()))

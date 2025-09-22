@@ -1411,7 +1411,8 @@ def generate_business_report(eda_results: dict) -> str:
     logger.info("Generate report using AI")
     return reportAI(eda_results,"full")
    else:
-        return generate_business_report(eda_results)
+        logger.warning("LLM not available, falling back to template report")
+        return generate_business_report_template(eda_results)
 
 def extract_eda_insights(result: dict) -> list:
     """
@@ -1646,9 +1647,9 @@ def extract_eda_insights(result: dict) -> list:
     # Remove duplicates and return
     return list(dict.fromkeys(insights))
 
-LLM_Model_name = "Vietnamese-LLaMA-2-7B"
+LLM_Model_name = "vilm/vinallama-2.7b"
 Device = "cuda" if torch.cuda.is_available() else "cpu"
-
+print (f"using device: {Device}")
 try:
     tokenizer = AutoTokenizer.from_pretrained(LLM_Model_name, trust_remote_code =True)
     model = AutoModelForCausalLM.from_pretrained(
@@ -1718,7 +1719,7 @@ Yêu cầu:
 
 Khuyến nghị hành động:"""
 
-    else:  # full report
+    else:  
         prompt = f"""Bạn là Trưởng phòng Phân tích Dữ liệu.
 Hãy viết một BÁO CÁO PHÂN TÍCH TOÀN DIỆN bằng tiếng Việt dựa trên dữ liệu sau:
 
@@ -1762,5 +1763,5 @@ BÁO CÁO:"""
         return response
 
     except Exception as e:
-        logger.error(f"❌ LLM generation failed: {e}")
+        logger.error(f"LLM generation failed: {e}")
         return f"[Lỗi khi sinh báo cáo bằng LLM: {str(e)}]"
