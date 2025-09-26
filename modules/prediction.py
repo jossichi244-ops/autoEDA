@@ -3,7 +3,7 @@ from fastapi import  UploadFile, HTTPException
 import pandas as pd
 from io import BytesIO
 import json
-from typing import Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Union
 from sklearn.model_selection import train_test_split
 import joblib
 import optuna
@@ -48,8 +48,11 @@ from prophet import Prophet
 from tcn import TCN 
 
 
-# Load pipeline config 1 lần khi app start
-with open("pipelineAutoML.json", "r") as f:
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_PATH = os.path.join(BASE_DIR, "pipelineAutoML.json")
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     pipeline_config = json.load(f)
 
 async def read_file_to_df(file: UploadFile) -> pd.DataFrame:
@@ -82,14 +85,16 @@ def detect_data_types(df: pd.DataFrame, detection_config: Dict[str, Any]) -> Dic
 
             # Nếu là object/string nhưng parse được sang datetime
             if col_dtype == "object":
-                try:
-                    parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
-                    # Nếu > 80% giá trị parse thành datetime hợp lệ → coi là time_series
-                    if parsed.notna().mean() > 0.8:
-                        detected[col] = "time_series"
+                for dayfirst in [True, False]:
+                    try:
+                        parsed = pd.to_datetime(df[col], errors="coerce", dayfirst=dayfirst)
+                        if parsed.notna().mean() > 0.5:
+                            detected[col] = "time_series"
+                            break  # thoát ngay khi parse được
+                    except Exception:
                         continue
-                except Exception:
-                    pass
+                if detected.get(col) == "time_series":
+                    continue
 
         # --- Numeric detection ---
         if detection_config["numeric"]["enabled"]:
@@ -211,7 +216,6 @@ def preprocess_data(
             log[col].append("extracted year, month, day, dayofweek")
 
     return df_processed, log, updated_types
-
 
 def feature_engineering(
     df: pd.DataFrame,
@@ -367,116 +371,160 @@ def feature_selection(
 
     return df_fs, log
 
-def auto_detect_target(df: pd.DataFrame, detected_types: Dict[str, str]) -> str:
-    common_target_names = ["target", "label", "y", "class", "price", "medv"]
-
+def auto_detect_target(df: pd.DataFrame, detected_types: Dict[str, str]) -> List[str]:
     candidate_cols = [c for c in df.columns if "cluster" not in c.lower()]
-
-    # Nếu chỉ có 1 numeric duy nhất
+    
     numeric_cols = [c for c in candidate_cols if detected_types.get(c) == "numeric"]
-    if len(numeric_cols) == 1:
-        return numeric_cols[0]
+    categorical_cols = [c for c in candidate_cols if detected_types.get(c) == "categorical"]
 
-    # Nếu có tên phổ biến
-    for c in candidate_cols:
-        if c.lower() in common_target_names:
-            return c
+    targets = []
 
-    # Nếu có numeric continuous nhiều giá trị
+    # 1. Numeric liên tục (nhiều giá trị) → regression target
     for c in numeric_cols:
-        if df[c].nunique() > 20 and pd.api.types.is_numeric_dtype(df[c]):
-            return c
+        if df[c].nunique() > 20:
+            targets.append(c)
 
-    return None
+    # 2. Categorical có số lớp nhỏ (2–10) → classification target
+    for c in categorical_cols:
+        nunique = df[c].nunique()
+        if 2 <= nunique <= 10:
+            targets.append(c)
+
+    # 3. Trường hợp chỉ có 1 cột numeric → có thể là target
+    if len(numeric_cols) == 1 and numeric_cols[0] not in targets:
+        targets.append(numeric_cols[0])
+
+    # 4. Trường hợp chỉ có 1 categorical với số lớp nhỏ → có thể là target
+    if len(categorical_cols) == 1:
+        c = categorical_cols[0]
+        nunique = df[c].nunique()
+        if 2 <= nunique <= 10 and c not in targets:
+            targets.append(c)
+
+    return targets
 
 def select_models_for_training(
     df: pd.DataFrame,
     detected_types: Dict[str, str],
     model_config: Dict[str, Any],
-    target_col: str = None
-) -> Dict[str, Any]:
-    
+    target_col: Union[str, List[str], None] = None
+) -> List[Dict[str, Any]]:
+
     if not target_col:
         target_col = auto_detect_target(df, detected_types)
 
-    # --- 1. Xác định loại bài toán ---
-    if target_col and target_col in df.columns:
-        y = df[target_col]
-
-        if pd.api.types.is_numeric_dtype(y):
-            if y.nunique() <= 20 and str(y.dtype).startswith("int"):
-                problem_type = "classification"
-            else:
-                problem_type = "regression"
-        else:
-            problem_type = "classification"
+    if isinstance(target_col, str):
+        target_cols = [target_col]
+    elif isinstance(target_col, list):
+        target_cols = target_col
     else:
-        problem_type = "clustering"
+        target_cols = []
 
-    # --- 2. Tạo context dataset ---
-    n_features = df.shape[1] - (1 if target_col else 0)
-    dataset_size = df.shape[0]
+    results = []
 
-    context = {
-        "problem_type": problem_type,
-        "n_features": n_features,
-        "dataset_size": dataset_size,
-        "has_imbalanced_target": False,
-        "interpretability_required": False,
-        "has_seasonality": "time_series" in detected_types.values(),
-        "has_lag_features": any("lag" in c for c in df.columns),
-        "contains_text_features": any(v == "text" for v in detected_types.values()),
-        "contains_categorical_features": any(v == "categorical" for v in detected_types.values()),
-        "n_unique_categories": max(
-            [df[c].nunique() for c, t in detected_types.items() if t == "categorical"],
-            default=0
-        ),
-        "has_arbitrary_shapes": False
-    }
+    for t_col in target_cols:
+        # --- 1. Xác định loại bài toán ---
+        if t_col and t_col in df.columns:
+            y = df[t_col]
+            if pd.api.types.is_numeric_dtype(y):
+                if y.nunique() <= 20 and str(y.dtype).startswith("int"):
+                    problem_type = "classification"
+                else:
+                    problem_type = "regression"
+            else:
+                problem_type = "classification"
+        else:
+            problem_type = "clustering"
 
-    # --- 3. Check imbalance ---
-    if target_col and problem_type == "classification":
-        y_counts = df[target_col].value_counts(normalize=True)
-        if y_counts.min() < 0.2:
-            context["has_imbalanced_target"] = True
+        # --- 2. Tạo context dataset ---
+        n_features = df.shape[1] - (1 if t_col else 0)
+        dataset_size = df.shape[0]
+        context = {
+            "problem_type": problem_type,
+            "n_features": int(n_features),
+            "dataset_size": int(dataset_size),
+            "has_imbalanced_target": False,
+            "interpretability_required": False,
+            "has_seasonality": "time_series" in detected_types.values(),
+            "has_lag_features": any("lag" in c for c in df.columns),
+            "contains_text_features": any(v == "text" for v in detected_types.values()),
+            "contains_categorical_features": any(v == "categorical" for v in detected_types.values()),
+            "n_unique_categories": max(
+                [df[c].nunique() for c, t in detected_types.items() if t == "categorical"],
+                default=0,
+            ),
+            "has_arbitrary_shapes": False,
+        }
 
-    # --- 4. Rule-based auto-select ---
-    selected_models, justification = None, None
-    auto_select_cfg = model_config.get("model_selection", {}).get("auto_select", {})
-    justification_cfg = auto_select_cfg.get("justification", {})
+        # --- 3. Check imbalance ---
+        if t_col and problem_type == "classification":
+            y_counts = df[t_col].value_counts(normalize=True)
+            if y_counts.min() < 0.2:
+                context["has_imbalanced_target"] = True
 
-    if auto_select_cfg.get("enabled", False):
+        # --- 4. Rule-based auto-select ---
+        selected_models, justification = None, None
+        auto_select_cfg = model_config.get("auto_select", {})
+        justification_cfg = auto_select_cfg.get("justification", {})
         rules = justification_cfg.get("rules", [])
-        for rule in rules:
-            try:
-                safe_globals = {
-                    "__builtins__": {},
-                    "true": True, "false": False, "True": True, "False": False
-                }
-                if eval(rule["condition"], safe_globals, context):
-                    selected_models = rule.get("selected_models", ["RandomForest"])
-                    justification = rule.get("justification", "Rule-based selection.")
-                    break
-            except Exception as e:
-                print(f"⚠️ Rule eval error: {rule.get('condition')} → {e}")
-                continue
 
-    # --- 5. Fallback ---
-    if not selected_models:
-        fallback = justification_cfg.get(
-            "fallback",
-            {"selected_models": ["RandomForest"], "justification": "Fallback default model."}
-        )
-        selected_models = fallback.get("selected_models", ["RandomForest"])
-        justification = fallback.get("justification", "Fallback default model.")
+        if auto_select_cfg.get("enabled", False):
+            for rule in rules:
+                try:
+                    safe_globals = {
+                        "__builtins__": {},
+                        "true": True, "false": False,
+                        "True": True, "False": False,
+                        "None": None,
+                    }
+                    result = eval(rule["condition"], safe_globals, context)
+                    if result:
+                        selected_models = rule.get("selected_models", ["RandomForest"])
+                        justification = rule.get("justification", "Rule-based selection.")
+                        break
+                except Exception as e:
+                    print(f"⚠️ Rule eval error: {rule.get('condition')} → {e}")
 
-    return {
-        "target_col": target_col,
-        "problem_type": problem_type,
-        "selected_models": selected_models,
-        "justification": justification,
-        "context": context
-    }
+        # --- 5. Fallback ---
+        if not selected_models:
+            model_sel_cfg = model_config.get("model_selection", {})
+            pipeline_defaults = model_sel_cfg.get("problem_type", {})
+
+            if problem_type in pipeline_defaults and pipeline_defaults[problem_type]:
+                selected_models = pipeline_defaults[problem_type]
+                justification = f"Không rule nào match → chọn toàn bộ model mặc định cho {problem_type} từ pipeline."
+            elif "auto_select" in model_sel_cfg:
+                fallback_cfg = (
+                    model_sel_cfg["auto_select"].get("justification", {}).get("fallback", {})
+                )
+                if fallback_cfg:
+                    selected_models = fallback_cfg.get("selected_models", ["RandomForest"])
+                    justification = fallback_cfg.get(
+                        "justification",
+                        f"Không có rule match và pipeline không định nghĩa {problem_type} → dùng fallback."
+                    )
+
+        if not selected_models:
+            if problem_type in ["classification", "regression"]:
+                selected_models = ["RandomForest"]
+            elif problem_type == "clustering":
+                selected_models = ["KMeans"]
+            elif problem_type == "time_series":
+                selected_models = ["Prophet"]
+            else:
+                selected_models = ["RandomForest"]
+            justification = f"⚠️ Chưa có cấu hình pipeline/fallback → tạm hardcode {selected_models[0]} (cần cập nhật config)."
+
+        # Lưu kết quả cho target này
+        results.append({
+            "target_col": t_col,
+            "problem_type": problem_type,
+            "selected_models": selected_models,
+            "justification": justification,
+            "context": context,
+        })
+
+    return results
 
 def production_phase_tuning(model_cls, X_train, y_train, problem_type, training_config):
     def objective(trial):
@@ -630,7 +678,7 @@ def production_phase_tuning(model_cls, X_train, y_train, problem_type, training_
     study = optuna.create_study(
         direction="maximize" if problem_type == "classification" else "minimize"
     )
-    study.optimize(objective, n_trials=30,
+    study.optimize(objective, n_trials=1,
                    timeout=training_config["training_config"]["max_runtime_minutes"] * 60)
 
     return study.best_params
@@ -735,142 +783,142 @@ def get_model_class(model_name: str, problem_type: str):
 
     return None
 
-def train_models(df, model_selection_log, training_config):
-    target_col = model_selection_log.get("target_col")
-    problem_type = model_selection_log.get("problem_type")
-    model_candidates = model_selection_log.get("selected_models", [])
+# def train_models(df, model_selection_log, training_config):
+#     target_col = model_selection_log.get("target_col")
+#     problem_type = model_selection_log.get("problem_type")
+#     model_candidates = model_selection_log.get("selected_models", [])
 
-    if target_col and target_col in df.columns:
-        X = df.drop(columns=target_col)
-        y = df[target_col]
-    else:
-        # Clustering không có target
-        X, y = df, None
+#     if target_col and target_col in df.columns:
+#         X = df.drop(columns=target_col)
+#         y = df[target_col]
+#     else:
+#         # Clustering không có target
+#         X, y = df, None
 
-    split_cfg = training_config.get("train_test_split", {})
-    if problem_type != "clustering" and target_col:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
-            test_size=split_cfg.get("test_size", 0.2),
-            random_state=split_cfg.get("random_state", 42),
-            stratify=y if problem_type == "classification" else None
-        )
-    else:
-        X_train, X_test, y_train, y_test = X, None, y, None
+#     split_cfg = training_config.get("train_test_split", {})
+#     if problem_type != "clustering" and target_col:
+#         X_train, X_test, y_train, y_test = train_test_split(
+#             X, y,
+#             test_size=split_cfg.get("test_size", 0.2),
+#             random_state=split_cfg.get("random_state", 42),
+#             stratify=y if problem_type == "classification" else None
+#         )
+#     else:
+#         X_train, X_test, y_train, y_test = X, None, y, None
 
-    results = {}
-    for model_name in model_candidates:
-        print(f"Training with Optuna: {model_name}")
-        model_cls = get_model_class(model_name, problem_type)
-        if not model_cls:
-            print(f"⚠️ Model {model_name} chưa được hỗ trợ")
-            continue
+#     results = {}
+#     for model_name in model_candidates:
+#         print(f"Training with Optuna: {model_name}")
+#         model_cls = get_model_class(model_name, problem_type)
+#         if not model_cls:
+#             print(f"⚠️ Model {model_name} chưa được hỗ trợ")
+#             continue
 
-        # Optuna tuning
-        best_params = {}
-        if problem_type in ["classification", "regression"]:
-            try:
-                best_params = production_phase_tuning(
-                    model_cls, X_train, y_train, problem_type, training_config
-                )
-            except Exception as e:
-                print(f"⚠️ Optuna tuning failed for {model_name}: {e}")
+#         # Optuna tuning
+#         best_params = {}
+#         if problem_type in ["classification", "regression"]:
+#             try:
+#                 best_params = production_phase_tuning(
+#                     model_cls, X_train, y_train, problem_type, training_config
+#                 )
+#             except Exception as e:
+#                 print(f"⚠️ Optuna tuning failed for {model_name}: {e}")
 
-        # Train final model
-        try:
-            model = model_cls(**best_params)
-        except TypeError:
-            model = model_cls()
+#         # Train final model
+#         try:
+#             model = model_cls(**best_params)
+#         except TypeError:
+#             model = model_cls()
 
-        try:
-            if problem_type != "clustering":
-                model.fit(X_train, y_train)
-            else:
-                model.fit(X)
-        except Exception as e:
-            print(f"⚠️ Training failed for {model_name}: {e}")
-            continue
+#         try:
+#             if problem_type != "clustering":
+#                 model.fit(X_train, y_train)
+#             else:
+#                 model.fit(X)
+#         except Exception as e:
+#             print(f"⚠️ Training failed for {model_name}: {e}")
+#             continue
 
-        # Evaluate test_score
-        test_score, preds = None, None
-        try:
-            if problem_type == "classification":
-                preds = model.predict(X_test)
-                test_score = accuracy_score(y_test, preds)
+#         # Evaluate test_score
+#         test_score, preds = None, None
+#         try:
+#             if problem_type == "classification":
+#                 preds = model.predict(X_test)
+#                 test_score = accuracy_score(y_test, preds)
 
-            elif problem_type == "regression":
-                preds = model.predict(X_test)
-                test_score = root_mean_squared_error(y_test, preds)
+#             elif problem_type == "regression":
+#                 preds = model.predict(X_test)
+#                 test_score = root_mean_squared_error(y_test, preds)
 
-            elif problem_type == "clustering":
-                if hasattr(model, "labels_"):
-                    preds = model.labels_
-                    if X.shape[0] > 1 and X.shape[0] > X.shape[1]:
-                        test_score = silhouette_score(X, preds)
+#             elif problem_type == "clustering":
+#                 if hasattr(model, "labels_"):
+#                     preds = model.labels_
+#                     if X.shape[0] > 1 and X.shape[0] > X.shape[1]:
+#                         test_score = silhouette_score(X, preds)
 
-            elif problem_type == "time_series":
-                if X_test is not None:
-                    preds = model.predict(len(X_test))
-                    test_score = mean_squared_error(y_test, preds) ** 0.5
+#             elif problem_type == "time_series":
+#                 if X_test is not None:
+#                     preds = model.predict(len(X_test))
+#                     test_score = mean_squared_error(y_test, preds) ** 0.5
 
-            elif problem_type == "text":
-                preds = model.predict(X_test)
-                test_score = f1_score(y_test, preds, average="weighted")
-        except Exception as e:
-            print(f"⚠️ Evaluation failed for {model_name}: {e}")
-            test_score = None
+#             elif problem_type == "text":
+#                 preds = model.predict(X_test)
+#                 test_score = f1_score(y_test, preds, average="weighted")
+#         except Exception as e:
+#             print(f"⚠️ Evaluation failed for {model_name}: {e}")
+#             test_score = None
 
-        # Save model
-        os.makedirs("models", exist_ok=True)
-        model_path = f"models/{model_name}.joblib"
-        try:
-            joblib.dump(model, model_path)
-        except Exception as e:
-            print(f"⚠️ Saving model {model_name} failed: {e}")
+#         # Save model
+#         os.makedirs("models", exist_ok=True)
+#         model_path = f"models/{model_name}.joblib"
+#         try:
+#             joblib.dump(model, model_path)
+#         except Exception as e:
+#             print(f"⚠️ Saving model {model_name} failed: {e}")
 
-        results[model_name] = {
-            "best_params": best_params,
-            "model_path": model_path,
-            "test_score": test_score,
-            "preds": preds.tolist() if preds is not None else None
-        }
+#         results[model_name] = {
+#             "best_params": best_params,
+#             "model_path": model_path,
+#             "test_score": test_score,
+#             "preds": preds.tolist() if preds is not None else None
+#         }
 
-    return results
+#     return results
 
-def model_comparison(results: Dict[str, Any], model_selection_log: Dict[str, Any], training_config: Dict[str, Any]) -> Dict[str, Any]:
-    problem_type = model_selection_log.get("problem_type")
-    selection_metric = training_config.get("model_comparison", {}).get("selection_metric", "auto")
+# def model_comparison(results: Dict[str, Any], model_selection_log: Dict[str, Any], training_config: Dict[str, Any]) -> Dict[str, Any]:
+#     problem_type = model_selection_log.get("problem_type")
+#     selection_metric = training_config.get("model_comparison", {}).get("selection_metric", "auto")
 
-    metric = "accuracy" if (selection_metric == "auto" and problem_type == "classification") else "rmse"
+#     metric = "accuracy" if (selection_metric == "auto" and problem_type == "classification") else "rmse"
 
-    # Lọc ra những model có test_score hợp lệ
-    valid_results = {m: r for m, r in results.items() if r.get("test_score") is not None}
-    if not valid_results:
-        raise ValueError("No valid models with test_score found. Check training pipeline.")
+#     # Lọc ra những model có test_score hợp lệ
+#     valid_results = {m: r for m, r in results.items() if r.get("test_score") is not None}
+#     if not valid_results:
+#         raise ValueError("No valid models with test_score found. Check training pipeline.")
 
-    if problem_type == "classification":
-        best_model = max(valid_results, key=lambda m: valid_results[m]["test_score"])
-    else:
-        best_model = min(valid_results, key=lambda m: valid_results[m]["test_score"])
+#     if problem_type == "classification":
+#         best_model = max(valid_results, key=lambda m: valid_results[m]["test_score"])
+#     else:
+#         best_model = min(valid_results, key=lambda m: valid_results[m]["test_score"])
 
-    best_score = valid_results[best_model]["test_score"]
+#     best_score = valid_results[best_model]["test_score"]
 
-    # Explanation
-    explanation_cfg = training_config.get("model_comparison", {}).get("explanation_template", {})
-    explanation = explanation_cfg.get("winning_model", "{model_name} wins with {metric_name}={score}").format(
-        model_name=best_model,
-        metric_name=metric,
-        score=best_score,
-        alpha=training_config.get("model_comparison", {}).get("alpha", 0.05)
-    )
-    justification = model_selection_log.get("justification", "")
+#     # Explanation
+#     explanation_cfg = training_config.get("model_comparison", {}).get("explanation_template", {})
+#     explanation = explanation_cfg.get("winning_model", "{model_name} wins with {metric_name}={score}").format(
+#         model_name=best_model,
+#         metric_name=metric,
+#         score=best_score,
+#         alpha=training_config.get("model_comparison", {}).get("alpha", 0.05)
+#     )
+#     justification = model_selection_log.get("justification", "")
 
-    return {
-        "best_model": best_model,
-        "best_score": best_score,
-        "p_value": None,  # Wilcoxon bỏ qua tạm
-        "explanation": f"{explanation}\n→ {justification}"
-    }
+#     return {
+#         "best_model": best_model,
+#         "best_score": best_score,
+#         "p_value": None,  # Wilcoxon bỏ qua tạm
+#         "explanation": f"{explanation}\n→ {justification}"
+#     }
 
 async def predict_from_df(df: pd.DataFrame, target_col: str = None) -> Dict[str, Any]:
     print("Received data for prediction")
@@ -899,26 +947,26 @@ async def predict_from_df(df: pd.DataFrame, target_col: str = None) -> Dict[str,
     )
 
     # --- Step 6: Model training ---
-    training_results = []
-    res = train_models(
-        df_fs,
-        model_selection_log=model_selection_log,
-        training_config=pipeline_config["model_training"]
-    )
+    # training_results = []
+    # res = train_models(
+    #     df_fs,
+    #     model_selection_log=model_selection_log,
+    #     training_config=pipeline_config["model_training"]
+    # )
 
-    # --- Step 7: Model comparison ---
-    comparison = model_comparison(
-        res,
-        model_selection_log=model_selection_log,
-        training_config=pipeline_config["model_training"]
-    )
+    # # --- Step 7: Model comparison ---
+    # comparison = model_comparison(
+    #     res,
+    #     model_selection_log=model_selection_log,
+    #     training_config=pipeline_config["model_training"]
+    # )
 
-    training_results = [{
-        "target_col": model_selection_log["target_col"],
-        "problem_type": model_selection_log["problem_type"],
-        "results": res,
-        "comparison": comparison
-    }]
+    # training_results = [{
+    #     "target_col": model_selection_log["target_col"],
+    #     "problem_type": model_selection_log["problem_type"],
+    #     "results": res,
+    #     "comparison": comparison
+    # }]
 
     # --- Final output ---
     return {
@@ -927,6 +975,178 @@ async def predict_from_df(df: pd.DataFrame, target_col: str = None) -> Dict[str,
         "feature_engineering_log": fe_log,
         "feature_selection_log": fs_log,
         "model_selection_log": model_selection_log,
-        "training_results": training_results,
-        "processed_data_preview": df_fs.head(5).to_dict(orient="records"),
+        # "training_results": training_results,
+        # "processed_data_preview": df_fs.head(5).to_dict(orient="records"),
     }
+
+
+##=================
+# def powerset(iterable):
+#     """Sinh tất cả tổ hợp con không rỗng"""
+#     s = list(iterable)
+#     return list(chain.from_iterable(combinations(s, r) for r in range(1, len(s)+1)))
+
+# def auto_detect_target(df: pd.DataFrame, detected_types: Dict[str, str]) -> List[Union[str, List[str]]]:
+#     candidate_cols = [
+#         c for c in df.columns 
+#         if "cluster" not in c.lower() and "id" not in c.lower()
+#     ]
+
+#     # Sinh powerset
+#     multi_candidates = [list(x) for x in powerset(candidate_cols)]
+#     return multi_candidates
+
+# def select_models_for_training(
+#     df: pd.DataFrame,
+#     detected_types: Dict[str, str],
+#     model_config: Dict[str, Any],
+#     target_col: str = None
+# ) -> Dict[str, Any]:
+#     if not target_col:
+#         target_candidates = auto_detect_target(df, detected_types)
+#         print(f"Target cols {target_candidates}")
+#     else:
+#         target_candidates = [target_col] if isinstance(target_col, str) else [target_col]
+
+#     results = []
+#     if not target_candidates:
+#         context = {
+#             "problem_type": "clustering",
+#             "n_features": df.shape[1],
+#             "dataset_size": df.shape[0],
+#             "contains_text_features": any(v == "text" for v in detected_types.values()),
+#             "contains_categorical_features": any(v == "categorical" for v in detected_types.values()),
+#         }
+#         results.append({
+#             "target_col": None,
+#             "problem_type": "clustering",
+#             "selected_models": ["KMeans"],
+#             "justification": "Không có target column → clustering.",
+#             "context": context,
+#         })
+#         return results
+
+#     for tgt in target_candidates:
+#         # --- 1. Lấy target data ---
+#         if isinstance(tgt, str):
+#             y = df[tgt]
+#         else:  # multi-target
+#             y = df[tgt]
+
+#     # --- 1. Xác định loại bài toán ---
+#     if isinstance(tgt, list) and len(tgt) > 1:
+#             problem_type = "multi_output"
+#     else:
+#         if pd.api.types.is_numeric_dtype(y):
+#             if y.nunique() <= 20 and str(y.dtype).startswith("int"):
+#                 problem_type = "classification"
+#             else:
+#                 problem_type = "regression"
+#         else:
+#             problem_type = "classification"
+
+#     # --- 2. Tạo context dataset ---
+#     n_features = df.shape[1] - (1 if target_col else 0)
+#     dataset_size = df.shape[0]
+#     context = {
+#         "problem_type": problem_type,
+#         "n_features": int(n_features),
+#         "dataset_size": int(dataset_size),
+#         "has_imbalanced_target": False,
+#         "interpretability_required": False,
+#         "has_seasonality": "time_series" in detected_types.values(),
+#         "has_lag_features": any("lag" in c for c in df.columns),
+#         "contains_text_features": any(v == "text" for v in detected_types.values()),
+#         "contains_categorical_features": any(v == "categorical" for v in detected_types.values()),
+#         "n_unique_categories": max(
+#             [df[c].nunique() for c, t in detected_types.items() if t == "categorical"],
+#             default=0,
+#         ),
+#         "has_arbitrary_shapes": False,
+#     }
+
+#     # --- 3. Check imbalance ---
+#     if target_col and problem_type == "classification":
+#         y_counts = df[target_col].value_counts(normalize=True)
+#         if y_counts.min() < 0.2:
+#             context["has_imbalanced_target"] = True
+
+#     # --- 4. Rule-based auto-select ---
+#     selected_models, justification = None, None
+#     auto_select_cfg = model_config.get("auto_select", {})
+#     justification_cfg = auto_select_cfg.get("justification", {})
+#     rules = justification_cfg.get("rules", [])
+   
+
+#     print("AUTO_SELECT_CFG:", auto_select_cfg)
+#     print("JUSTIFICATION_CFG:", justification_cfg)
+#     print("RULES LOADED:", rules)
+
+#     if auto_select_cfg.get("enabled", False):
+#         print("CONTEXT:", context)
+#         for rule in rules:
+#             try:
+#                 safe_globals = {
+#                     "__builtins__": {},
+#                     "true": True, "false": False,
+#                     "True": True, "False": False,
+#                     "None": None,
+#                 }
+#                 result = eval(rule["condition"], safe_globals, context)
+#                 print(f"CHECK RULE: {rule['condition']} → {result}")
+#                 print("RULE:", rule["condition"])
+#                 print("EVAL CONTEXT:", context)
+#                 print("RESULT:", eval(rule["condition"], safe_globals, context))
+
+#                 if result:
+#                     selected_models = rule.get("selected_models", ["RandomForest"])
+#                     justification = rule.get("justification", "Rule-based selection.")
+#                     break
+#             except Exception as e:
+#                 print(f"⚠️ Rule eval error: {rule.get('condition')} → {e}")
+
+
+#     # --- 5. Fallback ---
+#     if not selected_models:
+#         model_sel_cfg = model_config.get("model_selection", {})
+#         pipeline_defaults = model_sel_cfg.get("problem_type", {})
+
+#         # Ưu tiên 1: pipeline định nghĩa model cho problem_type
+#         if problem_type in pipeline_defaults and pipeline_defaults[problem_type]:
+#             selected_models = pipeline_defaults[problem_type]
+#             justification = (
+#                 f"Không rule nào match → chọn toàn bộ model mặc định cho {problem_type} từ pipeline."
+#             )
+
+#         # Ưu tiên 2: fallback trong config
+#         elif "auto_select" in model_sel_cfg:
+#             fallback_cfg = (
+#                 model_sel_cfg["auto_select"].get("justification", {}).get("fallback", {})
+#             )
+#             if fallback_cfg:
+#                 selected_models = fallback_cfg.get("selected_models", ["RandomForest"])
+#                 justification = fallback_cfg.get(
+#                     "justification",
+#                     f"Không có rule match và pipeline không định nghĩa {problem_type} → dùng fallback."
+#                 )
+
+#         if not selected_models:
+#             if problem_type in ["classification", "regression"]:
+#                 selected_models = ["RandomForest"]
+#             elif problem_type == "clustering":
+#                 selected_models = ["KMeans"]
+#             elif problem_type == "time_series":
+#                 selected_models = ["Prophet"]
+#             else:
+#                 selected_models = ["RandomForest"]
+#             justification = (
+#                 f"⚠️ Chưa có cấu hình pipeline/fallback → tạm hardcode {selected_models[0]} (cần cập nhật config)."
+#             )
+
+#     return {
+#         "target_col": target_col,
+#         "problem_type": problem_type,
+#         "selected_models": selected_models,
+#         "justification": justification,
+#         "context": context,
+#     }

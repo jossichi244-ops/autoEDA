@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from flask import app
 import numpy as np
 import pandas as pd
+from modules.beyond_eda import beyond_eda
 from modules.eda import analyze_column, clean_dataset, convert_numpy_types, descriptive_statistics, extract_eda_insights, generate_advanced_eda, generate_business_report, generate_relationships, generate_visualizations, infer_schema_from_df, inspect_dataset
 from modules.prediction import auto_detect_target, detect_data_types, predict_from_df, read_file_to_df
 import os
@@ -80,6 +81,11 @@ async def parse_file(file: UploadFile = File(...)):
     relationships = generate_relationships(df)
 
     advanced = generate_advanced_eda(df)
+    print("parse_file: Running beyond_eda() for advanced analysis")
+    try:
+        advanced_analysis = beyond_eda(df)
+    except Exception as e:
+        advanced_analysis = {"error": str(e)}
 
     print("parse_file: Sending data to run_prediction for forecasting")
     prediction_result = await predict_from_df(df)
@@ -94,7 +100,7 @@ async def parse_file(file: UploadFile = File(...)):
         "visualizations": visualizations,
         "relationships": relationships,
         "advanced": advanced,
-        
+        "advanced_analysis": advanced_analysis,
         "metadata": {
             "original_file_size_mb": round(file_size_mb, 2),
             "final_shape": df.shape,
@@ -132,9 +138,12 @@ def health():
         "memory_usage_mb": "not tracked"
     }
 
-with open("pipelineAutoML.json", "r") as f:
-    pipeline_config = json.load(f)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "modules", "pipelineAutoML.json")
 
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    pipeline_config = json.load(f)
+    
 @app.post("/api/prediction")
 async def run_prediction(file: UploadFile = File(...), target: str = Form(None)):
     df = await read_file_to_df(file)

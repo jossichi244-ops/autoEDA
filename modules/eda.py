@@ -56,7 +56,7 @@ def infer_schema_from_df(df: pd.DataFrame, max_unique_for_enum: int = 20) -> dic
                 dtype = "number"
             else:
                 parsed = pd.to_datetime(sample_str, errors="coerce", infer_datetime_format=True)
-                if parsed.notna().mean() > 0.8:
+                if parsed.notna().mean() > 0.5:
                     dtype = "datetime"
                 else:
                     dtype = "string"
@@ -96,25 +96,35 @@ def analyze_column(col: pd.Series) -> dict:
     if pd.api.types.is_integer_dtype(col) or pd.api.types.is_float_dtype(col):
         dtype = "numeric"
 
-    # datetime (cột vốn đã là datetime hoặc parse được từ chuỗi)
+    # datetime (cột vốn đã là datetime)
     elif pd.api.types.is_datetime64_any_dtype(col):
         dtype = "datetime"
     else:
-        # thử parse datetime từ chuỗi
-        dt_parsed = pd.to_datetime(series, errors="coerce", infer_datetime_format=True)
-        if dt_parsed.notnull().mean() > 0.8:  # parse được >=80%
-            dtype = "datetime"
-        elif unique_count <= 50 or unique_count < 0.05 * total:
-            dtype = "categorical"
-        elif (
-            series.str.contains(r"[;,|]").any() or
-            (unique_count > 50 and shannon_entropy(series) < math.log2(unique_count) * 0.3)
-        ):
-            dtype = "multi-select"
-        else:
-            dtype = "text"
+        # === Thử parse datetime với cả dayfirst=True và False ===
+        parsed_success = False
+        for dayfirst in [False, True]:
+            try:
+                dt_parsed = pd.to_datetime(series, errors="coerce", dayfirst=dayfirst)
+                if dt_parsed.notnull().mean() > 0.5:
+                    dtype = "datetime"
+                    parsed_success = True
+                    break
+            except Exception:
+                continue
 
-    # Stats
+        if not parsed_success:
+            # fallback sang categorical/text
+            if unique_count <= 50 or unique_count < 0.05 * total:
+                dtype = "categorical"
+            elif (
+                series.str.contains(r"[;,|]").any() or
+                (unique_count > 50 and shannon_entropy(series) < math.log2(unique_count) * 0.3)
+            ):
+                dtype = "multi-select"
+            else:
+                dtype = "text"
+
+    # Stats (giữ nguyên phần còn lại)
     stats = {}
     if dtype == "numeric":
         numeric_col = pd.to_numeric(col, errors="coerce")
@@ -153,6 +163,9 @@ def analyze_column(col: pd.Series) -> dict:
 
 def convert_numpy_types(obj):
     """Recursively convert numpy types to native Python types for JSON serialization."""
+    import numpy as np
+    import pandas as pd
+
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
@@ -162,19 +175,23 @@ def convert_numpy_types(obj):
     elif isinstance(obj, pd.Timestamp):
         return str(obj)
     elif isinstance(obj, dict):
-        # ✅ XỬ LÝ KHÓA: Chuyển pd.Timestamp thành str nếu là key
         new_dict = {}
         for key, value in obj.items():
             if isinstance(key, pd.Timestamp):
                 key = str(key)
             elif isinstance(key, (np.integer, np.floating)):
-                key = convert_numpy_types(key)  # cũng xử lý numpy key
+                key = convert_numpy_types(key)
             new_dict[key] = convert_numpy_types(value)
         return new_dict
     elif isinstance(obj, list):
         return [convert_numpy_types(item) for item in obj]
-    elif pd.isna(obj):
-        return None
+    elif pd.api.types.is_scalar(obj):
+        # chỉ check NaN cho scalar
+        return None if pd.isna(obj) else obj
+    elif isinstance(obj, pd.Series):
+        return obj.tolist()
+    elif isinstance(obj, pd.DataFrame):
+        return obj.to_dict(orient="records")
     return obj
 
 def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str] = None) -> dict:
@@ -992,17 +1009,10 @@ def analyze_timeseries(df, freq="D"):
 
     return results
 
-def generate_business_report_template(eda_results: dict) -> str:
-    """
-    Generate an executive-level business report from EDA results.
-    The style mimics a senior data analyst/consultant with 10+ years of experience.
-    """
-
+#incase using vilm/vinallama-2.7b please change this function name to generate_business_report_template 
+def generate_business_report(eda_results: dict) -> str: 
     sections = []
 
-    # =====================================================
-    # 1. Executive Summary
-    # =====================================================
     summary = "📌 Executive Summary\n"
 
     # 1️⃣ Tổng quan dataset
@@ -1071,9 +1081,6 @@ def generate_business_report_template(eda_results: dict) -> str:
 
     sections.append(summary)
 
-    # =====================================================
-    # 2. Data Quality & Reliability
-    # =====================================================
     dq = "📊 Data Quality & Reliability\n"
     inspection = eda_results.get("inspection", {})
     shape = inspection.get("shape", {})
@@ -1140,9 +1147,6 @@ def generate_business_report_template(eda_results: dict) -> str:
 
     sections.append(dq)
 
-    # =====================================================
-    # 3. Business Insights
-    # =====================================================
     insights = "🔎 Business Insights\n"
 
     # Segmentation
@@ -1185,6 +1189,8 @@ def generate_business_report_template(eda_results: dict) -> str:
 
     # Key Drivers
     sig = eda_results["advanced"].get("significance", {})
+    relationships = eda_results.get("relationships", {}).get("mixed", {})
+
     if sig.get("anova"):
         for key, stats in sig["anova"].items():
             if stats.get("p_value", 1) < 0.05:
@@ -1200,15 +1206,38 @@ def generate_business_report_template(eda_results: dict) -> str:
                     effect_level = "trung bình"
 
                 insights += (
-                    f"- ✅ Kiểm định ANOVA: Biến phân loại {cat} có ảnh hưởng có ý nghĩa thống kê tới {num} "
+                    f"- ✅ Kiểm định ANOVA: Biến phân loại '{cat}' có ảnh hưởng có ý nghĩa thống kê tới '{num}' "
                     f"(p = {p_val:.3f} < 0.05, η² = {eta2:.3f} → mức độ ảnh hưởng {effect_level}).\n"
-                    f"   → Tại sao kết luận như vậy? Vì p-value < 0.05 cho thấy sự khác biệt giữa các nhóm trong '{cat}' là không do ngẫu nhiên. "
-                    f"η² cho biết '{cat}' giải thích được {eta2*100:.1f}% sự biến động của '{num}'.\n"
-                    f"   → Ý nghĩa: Các nhóm trong '{cat}' có giá trị trung bình '{num}' khác biệt rõ rệt. "
-                    f"Có thể tối ưu '{num}' bằng cách điều chỉnh '{cat}'.\n"
+                    f"   → '{cat}' giải thích được {eta2*100:.1f}% sự biến động của '{num}'.\n"
+                    f"- **What** Kết quả phân tích cho thấy yếu tố *{cat}* có tác động rõ rệt đến *{num}*. "
+                    f"Trung bình của *{num}* thay đổi đáng kể giữa các nhóm {cat}.\n"
+                    f"- **So what**: Điều này chứng minh rằng {cat} là một đòn bẩy quan trọng, "
+                    f"có thể giải thích khoảng {eta2*100:.1f}% sự biến động của {num}. "
+                    f"Nếu không quản lý tốt yếu tố này, kết quả {num} sẽ biến động khó kiểm soát.\n"
+
                 )
 
-    # Key Drivers — Chi-square
+                # 🔍 Liệt kê chi tiết theo nhóm (nếu có dữ liệu từ relationships)
+                group_data = relationships.get(f"{cat}__vs__{num}", [])
+                if group_data:
+                    insights += f"   → Cụ thể theo từng nhóm trong '{cat}':\n"
+                    for row in group_data:
+                        group_val = row.get(cat, "N/A")
+                        mean_val = row.get("mean", 0)
+                        count = row.get("count", 0)
+                        insights += f"      • Khi '{cat}' = '{group_val}': trung bình '{num}' = {mean_val:.2f} (dựa trên {count} mẫu).\n"
+                    # Gợi ý hành động
+                    top_group = max(group_data, key=lambda x: x.get("mean", 0))
+                    worst_group = min(group_data, key=lambda x: x.get("mean", float('inf')))
+                    insights += (
+                        f"   → Hành động: Nhóm '{top_group[cat]}' đạt giá trị '{num}' cao nhất — nên nhân rộng yếu tố này. "
+                        f"Ngược lại, nhóm '{worst_group[cat]}' cần được điều tra để cải thiện.\n"
+                    )
+                else:
+                    insights += f"   → (Chi tiết theo nhóm chưa được cung cấp — vui lòng đảm bảo 'relationships' được tính trong EDA.)\n"
+
+    # Key Drivers — Chi-square (Categorical vs Categorical)
+    relationships_cat = eda_results.get("relationships", {}).get("categorical_vs_categorical", {})
     if sig.get("chi2"):
         for key, stats in sig["chi2"].items():
             if stats.get("p_value", 1) < 0.05:
@@ -1226,14 +1255,26 @@ def generate_business_report_template(eda_results: dict) -> str:
                     strength = "yếu đến trung bình"
 
                 insights += (
-                    f"- ✅ Kiểm định Chi-square: Có mối quan hệ có ý nghĩa thống kê giữa {c1} và {c2} "
+                    f"- ✅ Kiểm định Chi-square: Có mối quan hệ có ý nghĩa thống kê giữa '{c1}' và '{c2}' "
                     f"(p = {p_val:.3f} < 0.05, Cramér’s V = {cramers_v:.3f} → mức độ liên hệ {strength}).\n"
-                    f"   → Tại sao kết luận như vậy? Vì p-value < 0.05 chứng tỏ mối liên hệ không phải ngẫu nhiên. "
-                    f"Cramér’s V đo lường mức độ liên hệ — giá trị {cramers_v:.3f} cho thấy '{c1}' và '{c2}' có xu hướng thay đổi cùng nhau.\n"
-                    f"   → Ý nghĩa: Biết giá trị của '{c2}' giúp dự đoán '{c1}' tốt hơn (và ngược lại). "
-                
                 )
 
+                # 🔍 Liệt kê các kết hợp phổ biến
+                pair_data = relationships_cat.get(f"{c1}__vs__{c2}", [])
+                if pair_data:
+                    # Nhóm theo c1
+                    from collections import defaultdict
+                    grouped = defaultdict(list)
+                    for row in pair_data:
+                        grouped[row[c1]].append((row[c2], row["percentage"]))
+                    
+                    insights += f"   → Mô hình hành vi cụ thể:\n"
+                    for val1, combos in grouped.items():
+                        top_combo = max(combos, key=lambda x: x[1])
+                        insights += f"      • Khi '{c1}' = '{val1}', thường đi kèm '{c2}' = '{top_combo[0]}' ({top_combo[1]*100:.1f}% trường hợp).\n"
+                    insights += f"   → Ý nghĩa: Có thể cá nhân hóa '{c2}' dựa trên '{c1}' — ví dụ: nếu khách hàng ở '{val1}', ưu tiên đề xuất '{top_combo[0]}'.\n"
+                else:
+                    insights += f"   → (Dữ liệu kết hợp chi tiết chưa được cung cấp — vui lòng đảm bảo 'relationships' được tính trong EDA.)\n"
     sections.append(insights)
 
     # =====================================================
@@ -1406,13 +1447,13 @@ def generate_business_report_template(eda_results: dict) -> str:
 
     return "\n\n".join(sections)
 
-def generate_business_report(eda_results: dict) -> str:
-   if LLM_READY:
-    logger.info("Generate report using AI")
-    return reportAI(eda_results,"full")
-   else:
-        logger.warning("LLM not available, falling back to template report")
-        return generate_business_report_template(eda_results)
+# def generate_business_report(eda_results: dict) -> str:
+#    if LLM_READY:
+#     logger.info("Generate report using AI")
+#     return reportAI(eda_results,"full")
+#    else:
+#         logger.warning("LLM not available, falling back to template report")
+#         return generate_business_report_template(eda_results)
 
 def extract_eda_insights(result: dict) -> list:
     """
@@ -1647,121 +1688,121 @@ def extract_eda_insights(result: dict) -> list:
     # Remove duplicates and return
     return list(dict.fromkeys(insights))
 
-LLM_Model_name = "vilm/vinallama-2.7b"
-Device = "cuda" if torch.cuda.is_available() else "cpu"
-print (f"using device: {Device}")
-try:
-    tokenizer = AutoTokenizer.from_pretrained(LLM_Model_name, trust_remote_code =True)
-    model = AutoModelForCausalLM.from_pretrained(
-        LLM_Model_name,
-        torch_dtype = torch.float16 if Device == "cuda" else torch.float32,
-        low_cpu_mem_usage=True,
-        trust_remote_code = True
-    ).to(Device)
-    model.eval()
-    LLM_READY = True
-    logger.info(f"Model loaded successfully")
+# LLM_Model_name = "vilm/vinallama-2.7b"
+# Device = "cuda" if torch.cuda.is_available() else "cpu"
+# print (f"using device: {Device}")
+# try:
+#     tokenizer = AutoTokenizer.from_pretrained(LLM_Model_name, trust_remote_code =True)
+#     model = AutoModelForCausalLM.from_pretrained(
+#         LLM_Model_name,
+#         torch_dtype = torch.float16 if Device == "cuda" else torch.float32,
+#         low_cpu_mem_usage=True,
+#         trust_remote_code = True
+#     ).to(Device)
+#     model.eval()
+#     LLM_READY = True
+#     logger.info(f"Model loaded successfully")
 
-except Exception as e:
-    logger.error(f"Failed to load model:{e}")
-    LLM_READY =False
+# except Exception as e:
+#     logger.error(f"Failed to load model:{e}")
+#     LLM_READY =False
 
-def reportAI(eda_results:dict, section:str = "full"):
-    if not LLM_READY :
-        return "[Model did not load -  use default report]"
-    rows = eda_results.get("inspection", {}).get("shape",{}).get("rows",0)
-    cols = eda_results.get("inspection",{}).get("shape",{}).get("columns",0)
+# def reportAI(eda_results:dict, section:str = "full"):
+#     if not LLM_READY :
+#         return "[Model did not load -  use default report]"
+#     rows = eda_results.get("inspection", {}).get("shape",{}).get("rows",0)
+#     cols = eda_results.get("inspection",{}).get("shape",{}).get("columns",0)
 
-    raw_insights = extract_eda_insights(eda_results)
-    insights_text = "\n".join(f"- {insight}" for insight in raw_insights)
+#     raw_insights = extract_eda_insights(eda_results)
+#     insights_text = "\n".join(f"- {insight}" for insight in raw_insights)
 
-    # Tạo prompt tùy theo section
-    if section == "executive":
-        prompt = f"""Bạn là chuyên gia phân tích dữ liệu với 15 năm kinh nghiệm.
-Dựa trên kết quả phân tích dữ liệu sau, hãy viết một bản TÓM TẮT ĐIỀU HÀNH (Executive Summary) bằng tiếng Việt, ngắn gọn, súc tích, tập trung vào điểm then chốt cho ban lãnh đạo.
+#     # Tạo prompt tùy theo section
+#     if section == "executive":
+#         prompt = f"""Bạn là chuyên gia phân tích dữ liệu với 15 năm kinh nghiệm.
+# Dựa trên kết quả phân tích dữ liệu sau, hãy viết một bản TÓM TẮT ĐIỀU HÀNH (Executive Summary) bằng tiếng Việt, ngắn gọn, súc tích, tập trung vào điểm then chốt cho ban lãnh đạo.
 
-Thông tin:
-- Dataset có {rows:,} dòng và {cols} cột.
-- Các insight chính:
-{insights_text}
+# Thông tin:
+# - Dataset có {rows:,} dòng và {cols} cột.
+# - Các insight chính:
+# {insights_text}
 
-Yêu cầu:
-- Viết dưới 150 từ.
-- Dùng ngôn ngữ kinh doanh, không dùng thuật ngữ kỹ thuật.
-- Nêu bật rủi ro, cơ hội và khuyến nghị hành động cấp cao.
+# Yêu cầu:
+# - Viết dưới 150 từ.
+# - Dùng ngôn ngữ kinh doanh, không dùng thuật ngữ kỹ thuật.
+# - Nêu bật rủi ro, cơ hội và khuyến nghị hành động cấp cao.
 
-Bản tóm tắt:"""
+# Bản tóm tắt:"""
 
-    elif section == "insights":
-        prompt = f"""Bạn là chuyên gia phân tích dữ liệu.
-Dựa trên các insight sau, hãy viết lại chúng thành một phần "PHÂN TÍCH CHIẾN LƯỢC" mạch lạc, có cấu trúc, bằng tiếng Việt tự nhiên:
+#     elif section == "insights":
+#         prompt = f"""Bạn là chuyên gia phân tích dữ liệu.
+# Dựa trên các insight sau, hãy viết lại chúng thành một phần "PHÂN TÍCH CHIẾN LƯỢC" mạch lạc, có cấu trúc, bằng tiếng Việt tự nhiên:
 
-{insights_text}
+# {insights_text}
 
-Yêu cầu:
-- Nhóm các insight liên quan lại với nhau.
-- Giải thích ý nghĩa kinh doanh của từng insight.
-- Dùng biểu tượng cảm xúc (emoji) để làm nổi bật điểm quan trọng.
-- Viết như đang trình bày cho CEO nghe.
+# Yêu cầu:
+# - Nhóm các insight liên quan lại với nhau.
+# - Giải thích ý nghĩa kinh doanh của từng insight.
+# - Dùng biểu tượng cảm xúc (emoji) để làm nổi bật điểm quan trọng.
+# - Viết như đang trình bày cho CEO nghe.
 
-Phân tích chiến lược:"""
+# Phân tích chiến lược:"""
 
-    elif section == "recommendations":
-        prompt = f"""Bạn là Cố vấn chiến lược.
-Dựa trên các insight sau, hãy đề xuất 3-5 KHUYẾN NGHỊ HÀNH ĐỘNG cụ thể, có thể thực thi, chia theo ngắn hạn (0-3 tháng), trung hạn (3-12 tháng), dài hạn (1-3 năm):
+#     elif section == "recommendations":
+#         prompt = f"""Bạn là Cố vấn chiến lược.
+# Dựa trên các insight sau, hãy đề xuất 3-5 KHUYẾN NGHỊ HÀNH ĐỘNG cụ thể, có thể thực thi, chia theo ngắn hạn (0-3 tháng), trung hạn (3-12 tháng), dài hạn (1-3 năm):
 
-{insights_text}
+# {insights_text}
 
-Yêu cầu:
-- Mỗi khuyến nghị phải có: (1) Hành động cụ thể, (2) Bộ phận chịu trách nhiệm, (3) Kỳ vọng kết quả.
-- Ưu tiên tính khả thi và ROI.
-- Dùng ngôn ngữ mệnh lệnh, rõ ràng.
+# Yêu cầu:
+# - Mỗi khuyến nghị phải có: (1) Hành động cụ thể, (2) Bộ phận chịu trách nhiệm, (3) Kỳ vọng kết quả.
+# - Ưu tiên tính khả thi và ROI.
+# - Dùng ngôn ngữ mệnh lệnh, rõ ràng.
 
-Khuyến nghị hành động:"""
+# Khuyến nghị hành động:"""
 
-    else:  
-        prompt = f"""Bạn là Trưởng phòng Phân tích Dữ liệu.
-Hãy viết một BÁO CÁO PHÂN TÍCH TOÀN DIỆN bằng tiếng Việt dựa trên dữ liệu sau:
+#     else:  
+#         prompt = f"""Bạn là Trưởng phòng Phân tích Dữ liệu.
+# Hãy viết một BÁO CÁO PHÂN TÍCH TOÀN DIỆN bằng tiếng Việt dựa trên dữ liệu sau:
 
-THÔNG TIN CHUNG:
-- Kích thước dataset: {rows:,} dòng × {cols} cột
-- Các insight chính:
-{insights_text}
+# THÔNG TIN CHUNG:
+# - Kích thước dataset: {rows:,} dòng × {cols} cột
+# - Các insight chính:
+# {insights_text}
 
-YÊU CẦU BÁO CÁO:
-1. Executive Summary (Tóm tắt điều hành): 3-5 gạch đầu dòng chính.
-2. Phân tích chiến lược: Nhóm insight, giải thích ý nghĩa kinh doanh.
-3. Khuyến nghị hành động: Chia theo ngắn/trung/dài hạn, có tính khả thi.
-4. Rủi ro & Cơ hội: Liệt kê và đề xuất cách xử lý.
-5. Phụ lục: Ghi chú kỹ thuật ngắn gọn.
+# YÊU CẦU BÁO CÁO:
+# 1. Executive Summary (Tóm tắt điều hành): 3-5 gạch đầu dòng chính.
+# 2. Phân tích chiến lược: Nhóm insight, giải thích ý nghĩa kinh doanh.
+# 3. Khuyến nghị hành động: Chia theo ngắn/trung/dài hạn, có tính khả thi.
+# 4. Rủi ro & Cơ hội: Liệt kê và đề xuất cách xử lý.
+# 5. Phụ lục: Ghi chú kỹ thuật ngắn gọn.
 
-VIẾT BẰNG NGÔN NGỮ KINH DOANH, KHÔNG DÙNG THUẬT NGỮ KỸ THUẬT. SỬ DỤNG EMOJI ĐỂ LÀM NỔI BẬT Ý CHÍNH.
+# VIẾT BẰNG NGÔN NGỮ KINH DOANH, KHÔNG DÙNG THUẬT NGỮ KỸ THUẬT. SỬ DỤNG EMOJI ĐỂ LÀM NỔI BẬT Ý CHÍNH.
 
-BÁO CÁO:"""
+# BÁO CÁO:"""
 
-    try:
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(Device)
+#     try:
+#         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(Device)
         
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=1024,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id
-            )
+#         with torch.no_grad():
+#             outputs = model.generate(
+#                 **inputs,
+#                 max_new_tokens=1024,
+#                 temperature=0.7,
+#                 top_p=0.9,
+#                 do_sample=True,
+#                 pad_token_id=tokenizer.eos_token_id
+#             )
 
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+#         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Lấy phần sau prompt (vì model trả về cả prompt + response)
-        if response.startswith(prompt):
-            response = response[len(prompt):].strip()
+#         # Lấy phần sau prompt (vì model trả về cả prompt + response)
+#         if response.startswith(prompt):
+#             response = response[len(prompt):].strip()
         
-        # Làm sạch response
-        response = response.replace("BÁO CÁO:", "").replace("Executive Summary:", "").strip()
-        return response
+#         # Làm sạch response
+#         response = response.replace("BÁO CÁO:", "").replace("Executive Summary:", "").strip()
+#         return response
 
-    except Exception as e:
-        logger.error(f"LLM generation failed: {e}")
-        return f"[Lỗi khi sinh báo cáo bằng LLM: {str(e)}]"
+#     except Exception as e:
+#         logger.error(f"LLM generation failed: {e}")
+#         return f"[Lỗi khi sinh báo cáo bằng LLM: {str(e)}]"
