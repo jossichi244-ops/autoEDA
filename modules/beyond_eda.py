@@ -1,17 +1,18 @@
 # modules/beyond_eda.py
-from typing import Any, Dict
+from typing import Any, Dict, List
 import warnings
 import math
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.model_selection import KFold
 from sklearn.neighbors import NearestNeighbors
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-
+from sklearn.utils import resample
 from modules.eda import analyze_column
 
-# If you have lifelines installed, survival functions will be richer
 try:
     from lifelines import KaplanMeierFitter, CoxPHFitter
     LIFELINES_AVAILABLE = True
@@ -366,27 +367,163 @@ def detect_counterintuitive(df: pd.DataFrame, metric_col: str, value_col: str, e
             surprising.append(row.to_dict())
     return {"surprising": surprising, "count": len(surprising)}
 
-def scenario_simulation(df: pd.DataFrame, change_dict: dict):
+def scenario_simulation(
+    df: pd.DataFrame,
+    change_dict: dict = None,
+    min_pct: float = -0.2,
+    max_pct: float = 0.2,
+    n_steps: int = 10,
+    top_k: int = 20,
+    n_bootstrap: int = 200,
+    min_corr: float = 0.2
+) -> Dict[str, Any]:
     """
-    Giả lập kịch bản thay đổi (scenario simulation).
-    Ví dụ: change_dict = {"giá": -0.1, "ngân_sách_quảng_cáo": 0.2}
-    -> tức là giảm giá 10%, tăng ngân sách quảng cáo 20%.
+    Scenario simulation cho tất cả numeric columns:
+    1. Thay đổi feature trong khoảng min_pct → max_pct.
+    2. Tính correlation propagation.
+    3. Tính ML-based effect (LinearRegression + RandomForest).
+    4. Xuất narratives + bảng kết quả scenario + hypotheses.
     """
-    result = df.copy()
-    explain = []
-    for col, pct in change_dict.items():
-        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
-            new_col = f"{col}_kịch_bản"
-            result[new_col] = result[col] * (1 + pct)
-            explain.append(f"Giả sử {col} thay đổi {pct*100:.0f}%, ta tạo cột '{new_col}'.")
-        else:
-            result[f"{col}_kịch_bản"] = 0
-            explain.append(f"Không tìm thấy cột số '{col}', nên tạo cột '{col}_kịch_bản' toàn số 0.")
+    scenario_df = df.copy()
+    narratives = []
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    if len(numeric_cols) < 2:
+        return {"error": "Need >=2 numeric columns"}
+
+    # Outcome mặc định là cột có variance lớn nhất
+    outcome_col = df[numeric_cols].var().idxmax()
+    feature_cols = [c for c in numeric_cols if c != outcome_col]
+
+    if not feature_cols:
+        return {"error": "No valid feature columns"}
+
+    # Train ML models
+    X = df[feature_cols].fillna(0)
+    y = df[outcome_col].fillna(0)
+    lin = LinearRegression().fit(X, y)
+    coefs = dict(zip(feature_cols, lin.coef_))
+    rf = RandomForestRegressor(n_estimators=100, random_state=42).fit(X, y)
+    importances = dict(zip(feature_cols, rf.feature_importances_))
+
+    # Correlation matrix
+    corr = df[numeric_cols].corr().fillna(0)
+
+    # Tạo danh sách % thay đổi
+    pct_values = np.linspace(min_pct, max_pct, n_steps)
+    impacted_summary = {}
+
+    # === Scenario simulation cho từng feature ===
+    for col in feature_cols:
+        for pct in pct_values:
+            delta = df[col].mean() * pct
+            scenario_col = f"{col}_scenario_{int(pct*100)}pct"
+            scenario_df[scenario_col] = df[col] * (1 + pct)
+            narratives.append(f"Giả định {col} thay đổi {pct*100:.1f}% → tạo cột {scenario_col}.")
+
+            # Correlation propagation
+            for other in numeric_cols:
+                if other == col:
+                    continue
+                r = corr.loc[col, other]
+                impact = r * delta * (df[other].std() / (df[col].std() + 1e-9))
+                if abs(impact) > 1e-6:
+                    other_scenario_col = f"{other}_scenario_{int(pct*100)}pct"
+                    scenario_df[other_scenario_col] = df[other] + impact
+                    impacted_summary.setdefault(other, []).append((pct, impact))
+                    if impact > 0:
+                        trend = "tăng thêm"
+                    elif impact == 0:
+                        trend = "không đổi"
+                    else:
+                        trend = "giảm xuống"
+                    if r > 0.5:
+                        narratives.append(
+                            f"Nếu {col} tăng thì {other} cũng tăng. "
+                            f"(Chúng đi cùng nhau, giống như bóng với hình). "
+                            f"Với thay đổi này, {other} dự kiến {trend} {impact:+.2f} "
+                            f"so với giá trị trung bình {df[other].mean():.2f}, "
+                            f"tương đương {impact/df[other].mean()*100:.1f}%."
+                        )
+                    elif r < -0.5:
+                        narratives.append(
+                            f"Nếu {col} tăng thì {other} lại giảm "
+                            f"(Một bên lên thì bên kia xuống, như bập bênh). "
+                            f"Với thay đổi này, {other} dự kiến {trend} {impact:+.2f} "
+                            f"so với trung bình {df[other].mean():.2f}, "
+                            f"tức khoảng {impact/df[other].mean()*100:.1f}%."
+                        )
+                    # else:
+                    #     narratives.append(
+                    #         f"{col} và {other} chỉ hơi liên quan "
+                    #         f"(Giống như hai người quen xa xa). "
+                    #         f"Tác động dự kiến chỉ {impact:+.2f}, "
+                    #         f"so với trung bình {df[other].mean():.2f} là rất nhỏ "
+                    #         f"({impact/df[other].mean()*100:.2f}%)."
+                    #     )
+
+            # ML-based effect
+            pred_lin = coefs.get(col, 0) * delta
+            narratives.append(f"LinearRegression: {col} thay đổi {pct*100:.1f}% → {outcome_col} thay đổi {pred_lin:+.2f} (coef={coefs[col]:+.3f})")
+            pred_rf = importances.get(col, 0) * delta
+            narratives.append(f"RandomForest: {col} importance={importances[col]:.3f} → tác động khoảng {pred_rf:+.2f} tới {outcome_col}")
+
+    # Tóm tắt top impacted cols (lấy impact đầu tiên trong list)
+    top_impacts = {
+        col: f"{impacts[0][1]:+.2f}" if impacts else "0.00"
+        for col, impacts in impacted_summary.items()
+    }
+
+    # === Hypothesis generation ===
+    hypotheses: List[Dict[str, Any]] = []
+
+    # Corr-based hypotheses
+    for i, col1 in enumerate(numeric_cols):
+        for col2 in numeric_cols[i+1:]:
+            r = corr.loc[col1, col2]
+            if abs(r) < min_corr:
+                continue
+            signs = []
+            for _ in range(n_bootstrap):
+                boot = resample(df[[col1, col2]].dropna())
+                if len(boot) > 5:
+                    r_boot = boot[col1].corr(boot[col2])
+                    signs.append(np.sign(r_boot))
+            prob = np.mean([s == np.sign(r) for s in signs if s != 0])
+            direction = "tăng" if r > 0 else "giảm"
+            hypotheses.append({
+                "giả_thuyết": f"Nếu {col1} tăng thì {col2} có xu hướng {direction} (corr={r:.2f})",
+                "xác_suất": round(prob*100, 1)
+            })
+
+    # ML-based hypotheses (cross-validation OLS stability)
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    coef_signs = {f: [] for f in feature_cols}
+    for train_idx, test_idx in kf.split(X):
+        lin_cv = LinearRegression().fit(X.iloc[train_idx], y.iloc[train_idx])
+        for f, c in zip(feature_cols, lin_cv.coef_):
+            coef_signs[f].append(np.sign(c))
+    for f, signs in coef_signs.items():
+        if len(signs) == 0:
+            continue
+        stable = np.mean([s == np.sign(np.mean(signs)) for s in signs if s != 0])
+        direction = "tăng" if np.mean(signs) > 0 else "giảm"
+        hypotheses.append({
+            "giả_thuyết": f"Nếu {f} tăng thì {outcome_col} có xu hướng {direction} (OLS)",
+            "xác_suất": round(stable*100, 1)
+        })
 
     return {
-        "giải_thích": " ".join(explain),
-        "ví_dụ_bản_ghi": result.head(5).to_dict(orient="records"),
-        "cột_mới": [c for c in result.columns if c.endswith("_kịch_bản")]
+        "scenario": {
+            "narratives": narratives,
+            "ảnh_hưởng": top_impacts,
+            "ví_dụ_bản_ghi": scenario_df.head(5).to_dict(orient="records"),
+            "cột_mới": [c for c in scenario_df.columns if "_scenario" in c],
+            "ml_outcome": outcome_col,
+            "ml_coefficients": coefs,
+            "ml_importances": importances
+        },
+        "hypotheses": hypotheses
     }
 
 def causal_psm(df, treatment_col, covariates, outcome_col, match_ratio=1, caliper=None, ipw=False, random_state=42):
@@ -811,15 +948,10 @@ def beyond_eda(df: pd.DataFrame, config: dict = None):
 
     # 11. Scenario
     try:
-        if cfg.get("change_dict"):
-            results["scenario"] = scenario_simulation(df, change_dict=cfg["change_dict"])
-        else:
-            results["scenario"] = {"note": "Không có kịch bản thay đổi nào được nhập. Bạn có thể đưa ví dụ như {'price': -0.1, 'ads_budget': +0.2} để mô phỏng."}
+        results["scenario"] = scenario_simulation(df, change_dict=cfg.get("change_dict"))
     except Exception as e:
         results["scenario"] = {"error": str(e)}
 
-
-    # 12. Storytelling (PhD-like)
     try:
         results["storytelling"] = adaptive_storytelling_phd(
             df,
