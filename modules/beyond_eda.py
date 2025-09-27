@@ -12,7 +12,7 @@ import statsmodels.api as sm
 import statsmodels.formula.api as smf
 from sklearn.utils import resample
 from modules.eda import analyze_column
-
+from scipy.stats import ttest_ind
 try:
     from lifelines import KaplanMeierFitter, CoxPHFitter
     LIFELINES_AVAILABLE = True
@@ -367,6 +367,133 @@ def detect_counterintuitive(df: pd.DataFrame, metric_col: str, value_col: str, e
             surprising.append(row.to_dict())
     return {"surprising": surprising, "count": len(surprising)}
 
+def generate_counterfactual_row(
+    df: pd.DataFrame,
+    base_row: pd.Series,
+    target_col: str,
+    pct_change: float,
+    knn_model,
+    scaler,
+    other_cols: List[str],
+    original_df: pd.DataFrame
+) -> pd.Series:
+    """
+    Tạo một hàng counterfactual:
+    - Thay đổi target_col theo pct_change
+    - Giữ các cột khác "gần giống" base_row nhất có thể (dùng KNN trên không gian other_cols)
+    """
+    new_row = base_row.copy()
+    new_row[target_col] = base_row[target_col] * (1 + pct_change)
+
+    # Vector hóa phần còn lại để tìm hàng gần nhất
+    query_vec = scaler.transform(base_row[other_cols].to_frame().T)
+    distances, indices = knn_model.kneighbors(query_vec, n_neighbors=1)
+    nearest_idx = indices[0][0]
+    nearest_row = original_df.iloc[nearest_idx]
+
+    # Gán lại các cột khác từ hàng gần nhất → giữ "bối cảnh" giống thật
+    for col in other_cols:
+        new_row[col] = nearest_row[col]
+
+    return new_row
+
+def analyze_category_impact(
+    df: pd.DataFrame,
+    category_col: str,
+    numeric_cols: List[str] = None,
+    min_count: int = 10,
+    effect_threshold: float = 0.5,
+    compute_pvalue: bool = True
+) -> Dict[str, Any]:
+
+
+    if category_col not in df.columns:
+        return {"error": f"category_col '{category_col}' not found in dataframe"}
+
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    numeric_cols = [c for c in numeric_cols if c in df.columns and c != category_col]
+    if not numeric_cols:
+        return {"error": "No numeric columns to analyze"}
+
+    overall_means = df[numeric_cols].mean()
+    value_effects = {}
+    narratives = []
+
+    for val, group in df.groupby(category_col):
+        n = len(group)
+        if n < min_count:
+            continue
+
+        group_means = group[numeric_cols].mean()
+        effects = {}
+
+        for col in numeric_cols:
+            delta = float(group_means[col] - overall_means[col])
+
+            # --- Cohen's d với pooled std ---
+            other = df[df[category_col] != val][col].dropna()
+            group_vals = group[col].dropna()
+
+            if len(group_vals) < 2 or len(other) < 2:
+                pooled_std = df[col].std()
+            else:
+                pooled_std = np.sqrt(
+                    ((group_vals.var(ddof=1) * (len(group_vals) - 1)) +
+                     (other.var(ddof=1) * (len(other) - 1))) /
+                    (len(group_vals) + len(other) - 2)
+                )
+
+            cohens_d = delta / (pooled_std + 1e-9) if pooled_std > 0 else 0.0
+
+            effect_info = {
+                "delta": delta,
+                "cohens_d": cohens_d,
+                "count": n,
+                "group_mean": float(group_means[col]),
+                "overall_mean": float(overall_means[col]),
+            }
+
+            # --- p-value ---
+            if compute_pvalue and len(group_vals) > 1 and len(other) > 1:
+                _, pval = ttest_ind(group_vals, other, equal_var=False)
+                effect_info["pvalue"] = float(pval)
+
+            effects[col] = effect_info
+
+            # --- Narrative ---
+            if abs(cohens_d) >= effect_threshold:
+                direction = "tăng" if delta > 0 else "giảm"
+                pv_text = f", p={effect_info['pvalue']:.3f}" if "pvalue" in effect_info else ""
+                narratives.append(
+                    f"Khi {category_col} = '{val}', {col} {direction} {abs(delta):.2f} "
+                    f"(Cohen's d = {cohens_d:.2f}{pv_text}, n={n})"
+                )
+
+        value_effects[str(val)] = effects
+
+    # --- Top impact per column ---
+    top_impact = {}
+    for col in numeric_cols:
+        sorted_vals = sorted(
+            [(v, eff[col]["cohens_d"]) for v, eff in value_effects.items() if col in eff],
+            key=lambda x: abs(x[1]),
+            reverse=True
+        )
+        if sorted_vals:
+            top_val, top_d = sorted_vals[0]
+            top_impact[col] = {"value": top_val, "cohens_d": top_d}
+
+    return {
+        "category_col": category_col,
+        "value_effects": value_effects,
+        "top_impact_per_column": top_impact,
+        "narratives": narratives,
+        "min_count_threshold": min_count,
+        "effect_threshold": effect_threshold,
+    }
+
 def scenario_simulation(
     df: pd.DataFrame,
     change_dict: dict = None,
@@ -375,7 +502,9 @@ def scenario_simulation(
     n_steps: int = 10,
     top_k: int = 20,
     n_bootstrap: int = 200,
-    min_corr: float = 0.2
+    min_corr: float = 0.2,
+    n_counterfactuals: int = 100,
+    effect_threshold: float = 0.5
 ) -> Dict[str, Any]:
     """
     Scenario simulation cho tất cả numeric columns:
@@ -387,7 +516,7 @@ def scenario_simulation(
     scenario_df = df.copy()
     narratives = []
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-
+    categorical_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     if len(numeric_cols) < 2:
         return {"error": "Need >=2 numeric columns"}
 
@@ -467,7 +596,10 @@ def scenario_simulation(
             narratives.append(f"LinearRegression: {col} thay đổi {pct*100:.1f}% → {outcome_col} thay đổi {pred_lin:+.2f} (coef={coefs[col]:+.3f})")
             pred_rf = importances.get(col, 0) * delta
             narratives.append(f"RandomForest: {col} importance={importances[col]:.3f} → tác động khoảng {pred_rf:+.2f} tới {outcome_col}")
-
+            for cat_col in categorical_cols: 
+                cat_result = analyze_category_impact( df, category_col=cat_col, numeric_cols=numeric_cols, effect_threshold=effect_threshold ) 
+                if "narratives" in cat_result and cat_result["narratives"]: 
+                    narratives.extend([f"[{cat_col}] {n}" for n in cat_result["narratives"]])
     # Tóm tắt top impacted cols (lấy impact đầu tiên trong list)
     top_impacts = {
         col: f"{impacts[0][1]:+.2f}" if impacts else "0.00"
