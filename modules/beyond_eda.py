@@ -11,7 +11,7 @@ from sklearn.neighbors import NearestNeighbors
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 from sklearn.utils import resample
-from modules.eda import analyze_column
+from modules.eda import analyze_column, descriptive_statistics
 from scipy.stats import ttest_ind
 try:
     from lifelines import KaplanMeierFitter, CoxPHFitter
@@ -467,8 +467,8 @@ def analyze_category_impact(
                 direction = "tăng" if delta > 0 else "giảm"
                 pv_text = f", p={effect_info['pvalue']:.3f}" if "pvalue" in effect_info else ""
                 narratives.append(
-                    f"Khi {category_col} = '{val}', {col} {direction} {abs(delta):.2f} "
-                    f"(Cohen's d = {cohens_d:.2f}{pv_text}, n={n})"
+                    f"Khi {category_col} là '{val}'thì dẫn đến việc là giá trị của {col} {direction} {abs(delta):.2f} \n"
+                    f"Vì (Cohen's d = {cohens_d:.2f}{pv_text}, n={n})"
                 )
 
         value_effects[str(val)] = effects
@@ -504,7 +504,8 @@ def scenario_simulation(
     n_bootstrap: int = 200,
     min_corr: float = 0.2,
     n_counterfactuals: int = 100,
-    effect_threshold: float = 0.5
+    effect_threshold: float = 0.5,
+    stats: dict = None
 ) -> Dict[str, Any]:
     """
     Scenario simulation cho tất cả numeric columns:
@@ -515,10 +516,14 @@ def scenario_simulation(
     """
     scenario_df = df.copy()
     narratives = []
+    if stats is None:
+        stats = descriptive_statistics(df)
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    categorical_cols = list(stats.get("categorical", {}).keys())
     if len(numeric_cols) < 2:
         return {"error": "Need >=2 numeric columns"}
+    
+    datetime_cols = list(stats.get("datetime", {}).keys())
 
     # Outcome mặc định là cột có variance lớn nhất
     outcome_col = df[numeric_cols].var().idxmax()
@@ -596,11 +601,44 @@ def scenario_simulation(
             narratives.append(f"LinearRegression: {col} thay đổi {pct*100:.1f}% → {outcome_col} thay đổi {pred_lin:+.2f} (coef={coefs[col]:+.3f})")
             pred_rf = importances.get(col, 0) * delta
             narratives.append(f"RandomForest: {col} importance={importances[col]:.3f} → tác động khoảng {pred_rf:+.2f} tới {outcome_col}")
-            for cat_col in categorical_cols: 
-                cat_result = analyze_category_impact( df, category_col=cat_col, numeric_cols=numeric_cols, effect_threshold=effect_threshold ) 
-                if "narratives" in cat_result and cat_result["narratives"]: 
-                    narratives.extend([f"[{cat_col}] {n}" for n in cat_result["narratives"]])
-    # Tóm tắt top impacted cols (lấy impact đầu tiên trong list)
+            for cat_col in categorical_cols:
+                cat_result = analyze_category_impact(
+                    df, category_col=cat_col,
+                    numeric_cols=numeric_cols,
+                    effect_threshold=effect_threshold
+                )
+                if "narratives" in cat_result and cat_result["narratives"]:
+                    narratives.extend([f"Xét [{cat_col}] {n}" for n in cat_result["narratives"]])
+
+            # Datetime (theo quý)
+            for dt_col in datetime_cols:
+                try:
+                    dt_info = stats["datetime"].get(dt_col, {})
+                    dayfirst_flag = dt_info.get("dayfirst_used", True)
+
+                    temp = df.copy()
+                    temp[dt_col] = pd.to_datetime(temp[dt_col], errors="coerce", dayfirst=dayfirst_flag)
+                    temp = temp.dropna(subset=[dt_col])
+                    if temp.empty:
+                        continue
+
+                    # Thử nhiều chu kỳ thời gian
+                    for freq, label in [("Y", "theo năm"), ("Q", "theo quý"), ("M", "theo tháng"), ("W", "theo tuần")]:
+                        temp_grouped = temp.copy()
+                        temp_grouped[label] = temp_grouped[dt_col].dt.to_period(freq).astype(str)
+
+                        dt_result = analyze_category_impact(
+                            temp_grouped,
+                            category_col=label,
+                            numeric_cols=numeric_cols,
+                            effect_threshold=effect_threshold
+                        )
+                        if "narratives" in dt_result and dt_result["narratives"]:
+                            narratives.extend([f"Xét [{label}] {n}" for n in dt_result["narratives"]])
+
+                except Exception as e:
+                    narratives.append(f"Lỗi khi phân tích datetime {dt_col}: {e}")
+    
     top_impacts = {
         col: f"{impacts[0][1]:+.2f}" if impacts else "0.00"
         for col, impacts in impacted_summary.items()
@@ -646,15 +684,13 @@ def scenario_simulation(
         })
 
     return {
-        "scenario": {
-            "narratives": narratives,
-            "ảnh_hưởng": top_impacts,
-            "ví_dụ_bản_ghi": scenario_df.head(5).to_dict(orient="records"),
-            "cột_mới": [c for c in scenario_df.columns if "_scenario" in c],
-            "ml_outcome": outcome_col,
-            "ml_coefficients": coefs,
-            "ml_importances": importances
-        },
+        "narratives": narratives,
+        "ảnh_hưởng": top_impacts,
+        "ví_dụ_bản_ghi": scenario_df.head(5).to_dict(orient="records"),
+        "cột_mới": [c for c in scenario_df.columns if "_scenario" in c],
+        "ml_outcome": outcome_col,
+        "ml_coefficients": coefs,
+        "ml_importances": importances,
         "hypotheses": hypotheses
     }
 

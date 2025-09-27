@@ -119,6 +119,7 @@ async def parse_file(file: UploadFile = File(...)):
     print("All columns:", df.columns.tolist())
     print("Numeric cols:", list(descriptive["numeric"].keys()))
     print("Categorical cols:", list(descriptive["categorical"].keys()))
+    print("Datetime cols:", list(descriptive["datetime"].keys()))
     print("Unique counts per categorical column:")
     for col in list(descriptive["categorical"].keys()):
         print(f"  {col}: {df[col].nunique()} unique values")

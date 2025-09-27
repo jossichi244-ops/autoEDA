@@ -17,6 +17,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+import warnings
+warnings.filterwarnings("ignore", message="Could not infer format")
 
 
 import pandas as pd
@@ -46,18 +48,25 @@ def infer_schema_from_df(df: pd.DataFrame, max_unique_for_enum: int = 20) -> dic
             dtype = "datetime"
         else:
             # --- fallback: thử parse string ---
-            sample_str = series.astype(str).head(100)
+            sample_str = series.astype(str) 
+            parsed_success = False
+            for dayfirst in [False, True]:
+                try:
+                    dt_parsed = pd.to_datetime(sample_str, errors="coerce", dayfirst=dayfirst)
+                    if dt_parsed.notnull().mean() > 0.5:  
+                        dtype = "datetime"
+                        parsed_success = True
+                        break
+                except Exception:
+                    continue
 
-            # integer regex
-            if sample_str.str.match(r"^-?\d+$").all():
-                dtype = "integer"
-            # float regex
-            elif sample_str.str.match(r"^-?\d+(\.\d+)?$").all():
-                dtype = "number"
-            else:
-                parsed = pd.to_datetime(sample_str, errors="coerce", infer_datetime_format=True)
-                if parsed.notna().mean() > 0.5:
-                    dtype = "datetime"
+            if not parsed_success:
+                # integer regex
+                if sample_str.str.match(r"^-?\d+$").all():
+                    dtype = "integer"
+                # float regex
+                elif sample_str.str.match(r"^-?\d+(\.\d+)?$").all():
+                    dtype = "number"
                 else:
                     dtype = "string"
 
@@ -476,15 +485,16 @@ def descriptive_statistics(df: pd.DataFrame, max_categories: int = 10) -> dict:
     result = {
         "numeric": {},
         "categorical": {},
+        "datetime": {},
         "remarks": []
     }
 
+    # --- Numeric ---
     num_cols = df.select_dtypes(include=[np.number]).columns
     for col in num_cols:
         series = df[col].dropna()
         if series.empty:
             continue
-
         desc = {
             "count": int(series.count()),
             "min": float(series.min()),
@@ -495,62 +505,66 @@ def descriptive_statistics(df: pd.DataFrame, max_categories: int = 10) -> dict:
             "skew": float(skew(series)),
             "kurtosis": float(kurtosis(series))
         }
-
-        # ✅ Detect outliers using IQR
         q1, q3 = np.percentile(series, [25, 75])
         iqr = q3 - q1
         lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
         outliers = ((series < lower) | (series > upper)).sum()
         desc["outliers"] = int(outliers)
-
         result["numeric"][col] = desc
 
-        # 📝 Rule-based remarks
-        if desc["skew"] > 1:
-            result["remarks"].append(f"Cột '{col}' phân phối lệch phải (nhiều giá trị nhỏ, ít giá trị rất lớn).")
-        elif desc["skew"] < -1:
-            result["remarks"].append(f"Cột '{col}' phân phối lệch trái (nhiều giá trị lớn, ít giá trị rất nhỏ).")
-
-        if desc["outliers"] > 0:
-            result["remarks"].append(f"Cột '{col}' có {desc['outliers']} giá trị bất thường (outliers).")
-
-    # 🔠 Categorical columns
+    # --- Categorical & Datetime ---
     cat_cols = df.select_dtypes(include=["object", "category"]).columns
     for col in cat_cols:
-        series = df[col].dropna().astype(str)
+        series = df[col].dropna()
         if series.empty:
             continue
 
+        # thử parse datetime (cả dayfirst True/False)
+        parsed1 = pd.to_datetime(series, errors="coerce", dayfirst=True)
+        parsed2 = pd.to_datetime(series, errors="coerce", dayfirst=False)
+        success_rate1 = parsed1.notna().mean()
+        success_rate2 = parsed2.notna().mean()
+        if max(success_rate1, success_rate2) > 0.5:
+            parsed = parsed1 if success_rate1 >= success_rate2 else parsed2
+            parsed = parsed.dropna()
+            desc = {
+                "count": int(parsed.count()),
+                "min": str(parsed.min()),
+                "max": str(parsed.max()),
+                "range_days": int((parsed.max() - parsed.min()).days),
+                # "frequency": freq_label,
+                "dayfirst_used": bool(success_rate1 >= success_rate2)
+            }
+            diffs = parsed.sort_values().diff().dt.days.dropna()
+            if not diffs.empty:
+                median_gap = diffs.median()
+                if median_gap <= 1:
+                    desc["frequency"] = "daily"
+                elif median_gap <= 7:
+                    desc["frequency"] = "weekly"
+                elif median_gap <= 31:
+                    desc["frequency"] = "monthly"
+                else:
+                    desc["frequency"] = f"{median_gap:.0f}-day interval"
+            result["datetime"][col] = desc
+            continue  # dừng, không xử lý tiếp như categorical
+
+        # categorical
+        series = series.astype(str)
         freq = series.value_counts()
         total = len(series)
-
-        # nếu số lượng unique nhỏ hơn 20 thì lấy hết, ngược lại lấy top N
-        if series.nunique() <= 20:
-            freq = freq
-        else:
+        if series.nunique() > max_categories:
             freq = freq.head(max_categories)
-
         values = [
             {"value": val, "count": int(cnt), "percent": round(cnt / total * 100, 2)}
             for val, cnt in freq.items()
         ]
-
         result["categorical"][col] = {
             "count": int(total),
             "unique": int(series.nunique()),
             "top_values": values
         }
 
-        # 📝 Remarks
-        if series.nunique() == 1:
-            result["remarks"].append(f"Cột '{col}' chỉ có 1 giá trị duy nhất, ít thông tin.")
-        elif series.nunique() < 5:
-            result["remarks"].append(f"Cột '{col}' có ít hơn 5 loại dữ liệu → đơn giản.")
-        else:
-            top_val = values[0]
-            if top_val["percent"] > 80:
-                result["remarks"].append(f"Cột '{col}' bị lệch mạnh: {top_val['value']} chiếm {top_val['percent']}%.")
-    
     return result
 
 def generate_visualizations(df: pd.DataFrame, max_categories: int = 15) -> dict:
