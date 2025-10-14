@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from modules.beyond_eda import beyond_eda
 from modules.eda import analyze_column, clean_dataset, convert_numpy_types, descriptive_statistics, extract_eda_insights, generate_advanced_eda, generate_business_report, generate_relationships, generate_visualizations, infer_schema_from_df, inspect_dataset
+from modules.ocr import extract_fields_from_text, infer_schema_from_ocr_fields, process_docx, process_image, process_pdf
 from modules.prediction import auto_detect_target, detect_data_types, predict_from_df, read_file_to_df
 import os
 from dotenv import load_dotenv
@@ -15,6 +16,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 import logging
+import warnings
+warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +40,7 @@ app.add_middleware(
 
 @app.post("/api/parse-file")
 async def parse_file(file: UploadFile = File(...)):
+    start_time = datetime.now()
     name = file.filename.lower()
     content = await file.read()
     
@@ -63,6 +68,7 @@ async def parse_file(file: UploadFile = File(...)):
     df = df.map(lambda x: None if isinstance(x, float) and np.isnan(x) else x)  
 
     schema = infer_schema_from_df(df)
+    
     preview = df.head(10).to_dict(orient="records")
     understanding = []
     for col in df.columns:
@@ -87,9 +93,11 @@ async def parse_file(file: UploadFile = File(...)):
     except Exception as e:
         advanced_analysis = {"error": str(e)}
 
-    print("parse_file: Sending data to run_prediction for forecasting")
-    prediction_result = await predict_from_df(df)
-    print("parse_file: Received prediction result")
+    # print("parse_file: Sending data to run_prediction for forecasting")
+    # prediction_result = await predict_from_df(df)
+    # print("parse_file: Received prediction result")
+    end_time = datetime.now()
+    total_time = (end_time - start_time).total_seconds()
     result = {
         "schema": schema,
         "preview": preview,
@@ -105,6 +113,11 @@ async def parse_file(file: UploadFile = File(...)):
             "original_file_size_mb": round(file_size_mb, 2),
             "final_shape": df.shape,
             "sampled": file_size_mb > 10 
+        },
+        "analysis_timing": {
+            "time_receive_data": start_time.isoformat(),
+            "time_done_analysis": end_time.isoformat(),
+            "total_seconds": total_time
         }
     }
 
@@ -124,7 +137,7 @@ async def parse_file(file: UploadFile = File(...)):
     for col in list(descriptive["categorical"].keys()):
         print(f"  {col}: {df[col].nunique()} unique values")
     cleaned = convert_numpy_types(result)
-    cleaned["prediction_result"] = prediction_result
+    # cleaned["prediction_result"] = prediction_result
     return JSONResponse(
         content=cleaned,
         media_type="application/json"
@@ -158,11 +171,13 @@ async def run_prediction(file: UploadFile = File(...), target: str = Form(None))
     else:
         target_col = auto_detect_target(df, detected_types)
 
-    # Đánh dấu target
     if target_col:
-        detected_types[target_col] = "target"
+        if isinstance(target_col, list):
+            for c in target_col:
+                detected_types[c] = "target"
+        else:
+            detected_types[target_col] = "target"
 
-    # Run pipeline
     result = await predict_from_df(df, target_col=target_col)
 
     # Attach info
@@ -172,3 +187,46 @@ async def run_prediction(file: UploadFile = File(...), target: str = Form(None))
     ]
     return result
 
+@app.post("/api/ocr")
+async def ocr_file(file: UploadFile = File(...)):
+    name = file.filename.lower()
+    logger.info(f"📥 Received file: {name}")
+
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading file: {e}")
+
+    # --- OCR STEP ---
+    try:
+        if name.endswith((".jpg", ".jpeg", ".png")):
+            ocr_result = process_image(content)
+        elif name.endswith(".pdf"):
+            ocr_result = process_pdf(content)
+        elif name.endswith((".docx", ".doc")):
+            ocr_result = process_docx(content)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file format")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OCR processing failed: {e}")
+
+    try:
+        text_content = ocr_result.get("text", "")
+        fields_info = extract_fields_from_text(text_content) or {}
+        schema = infer_schema_from_ocr_fields(fields_info)
+
+        # ✅ In schema ra terminal hoặc log
+        print("📄 ====== GENERATED JSON SCHEMA ======")
+        print(json.dumps(schema, indent=2, ensure_ascii=False))
+        print("=====================================")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Field extraction failed: {e}")
+
+    # --- RETURN ---
+    return JSONResponse(content={
+        "ocr_result": ocr_result,
+        "fields_detected": fields_info.get("fields", []),
+        "unmatched_lines": fields_info.get("unmatched", []),
+        "schema_suggested": schema
+    })

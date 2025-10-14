@@ -1,36 +1,42 @@
 {
   "data_type_detection": {
     "time_series": {
-      "criteria": ["datetime_index", "ordered_timestamps"],
+      "criteria": ["datetime_index", "ordered_timestamps", "autocorrelation > 0.3"],
       "enabled": true
     },
     "text": {
-      "criteria": ["long_string_columns", "n_tokens_avg > 5"],
+      "criteria": ["long_string_columns", "n_tokens_avg > 5", "vocab_size > 100"],
       "enabled": true
     },
     "numeric": {
-      "criteria": ["float64", "int64"],
+      "criteria": ["float64", "int64", "continuous_values"],
       "enabled": true
     },
     "categorical": {
-      "criteria": ["object", "category"],
+      "criteria": ["object", "category", "n_unique < 0.5 * n_rows"],
       "enabled": true
+    },
+    "image": {
+      "criteria": ["file_extension in ['jpg','png','jpeg']", "pixel_matrix_detected"],
+      "enabled": false
     }
   },
+
   "preprocessing": {
     "numeric": {
       "imputer": ["median", "mean", "knn"],
       "scaling": ["StandardScaler", "RobustScaler", "QuantileTransformer"],
-      "outlier_handling": ["none", "winsorize", "clip"]
+      "outlier_handling": ["none", "winsorize", "clip", "iqr_filter"]
     },
     "categorical": {
       "imputer": ["most_frequent", "missing_category"],
-      "encoding": ["OneHotEncoder", "TargetEncoder", "FrequencyEncoder"]
+      "encoding": ["OneHotEncoder", "TargetEncoder", "FrequencyEncoder", "OrdinalEncoder"]
     },
     "text": {
       "cleaning": [
         "lowercase",
         "remove_stopwords",
+        "remove_punctuation",
         "lemmatization",
         "stemming"
       ],
@@ -39,27 +45,30 @@
       "topic_modeling": ["LDA", "BERTopic"]
     },
     "time_series": {
-      "features": ["lag", "rolling_mean", "rolling_std", "exp_smoothing"],
+      "features": ["lag", "rolling_mean", "rolling_std", "exp_smoothing", "trend", "seasonality"],
       "decomposition": ["STL", "seasonal_decompose"],
-      "frequency": ["daily", "weekly", "monthly"]
+      "frequency": ["daily", "weekly", "monthly", "quarterly"]
     },
     "target": {
       "imbalance": ["none", "smote", "adasyn", "class_weight"],
       "threshold": 0.2
     }
   },
+
   "feature_engineering": {
     "numeric": {
       "apply_if": "n_numeric >= 2",
       "strategies": [
         "interaction_terms",
         "polynomial_degree=2",
-        "polynomial_degree=3"
+        "polynomial_degree=3",
+        "log_transform",
+        "binning"
       ]
     },
     "categorical": {
       "apply_if": "n_categorical >= 2",
-      "strategies": ["cross_features"]
+      "strategies": ["cross_features", "frequency_encoding", "count_encoding"]
     },
     "text": {
       "apply_if": "avg_tokens > 5",
@@ -67,14 +76,15 @@
     },
     "time_series": {
       "apply_if": "has_datetime_index",
-      "strategies": ["lag_features", "rolling_stats", "trend", "seasonality"]
+      "strategies": ["lag_features", "rolling_stats", "trend", "seasonality", "autocorr_features"]
     }
   },
+
   "feature_selection": {
-    "numeric": ["lasso", "variance_threshold", "pca"],
-    "categorical": ["chi2", "mutual_info"],
-    "text": ["tfidf_feature_importance", "embedding_dim_reduction"],
-    "time_series": ["autocorrelation_selection", "feature_importance"]
+    "numeric": ["lasso", "variance_threshold", "pca", "mutual_info_regression"],
+    "categorical": ["chi2", "mutual_info_classif"],
+    "text": ["tfidf_feature_importance", "embedding_dim_reduction", "svd_topic_selection"],
+    "time_series": ["autocorrelation_selection", "feature_importance", "seasonality_strength"]
   },
 
   "model_selection": {
@@ -88,7 +98,8 @@
         "XGBRegressor",
         "LGBMRegressor",
         "SVR",
-        "CatBoostRegressor"
+        "CatBoostRegressor",
+        "MLPRegressor"
       ],
       "classification": [
         "LogisticRegression",
@@ -107,10 +118,10 @@
         "SARIMA",
         "Prophet",
         "ExponentialSmoothing",
+        "XGBRegressor (with lag features)",
         "LSTM",
         "GRU",
-        "TCN",
-        "XGBRegressor (with lag features)"
+        "TCN"
       ],
       "clustering": [
         "KMeans",
@@ -119,158 +130,144 @@
         "GaussianMixture",
         "AgglomerativeClustering",
         "HDBSCAN",
-        "SpectralClustering"
+        "SpectralClustering",
+        "OPTICS"
+      ],
+      "text": [
+        "NaiveBayes",
+        "LogisticRegression",
+        "LinearSVC",
+        "XGBClassifier",
+        "Transformer",
+        "BERT"
       ]
     },
-    "ensemble_strategies": ["bagging", "boosting", "stacking", "voting"],
+
+    "ensemble_strategies": ["bagging", "boosting", "stacking", "voting", "blending"],
+
     "deep_learning": {
       "enabled": true,
-      "architectures": ["MLP", "CNN", "RNN", "LSTM", "Transformer", "BERT"],
-      "frameworks": ["TensorFlow", "PyTorch", "Keras"]
+      "architectures": ["MLP", "CNN", "RNN", "LSTM", "GRU", "Transformer", "BERT"],
+      "frameworks": ["TensorFlow", "PyTorch", "Keras"],
+      "conditions": {
+        "min_dataset_size": 10000,
+        "max_training_time": "6h",
+        "hardware": ["GPU", "TPU"]
+      }
     },
+
     "selection_criteria": [
       "accuracy",
       "f1_score",
+      "precision",
+      "recall",
       "auc_roc",
       "rmse",
+      "mae",
       "mape",
+      "r2",
       "silhouette_score",
       "adjusted_rand_score",
       "davies_bouldin_index"
     ],
-  "auto_select": {
-    "enabled": true,
-    "strategy": "performance_first",
-    "justification": {
-      "rules": [
-        
-        {
-          "condition": "problem_type == 'classification' and dataset_size < 1000 and n_features < 20",
-          "selected_models": ["LogisticRegression", "SVC", "KNeighborsClassifier", "DecisionTreeClassifier"],
-          "justification": "Classification small data, low-dim → simple models (Logistic, SVM, KNN, Tree)."
-        },
-        {
-          "condition": "problem_type == 'classification' and dataset_size < 1000 and n_features >= 20",
-          "selected_models": ["LogisticRegression", "LinearSVC", "NaiveBayes"],
-          "justification": "Classification small data, high-dim → prefer linear models with regularization or NB."
-        },
-        {
-          "condition": "problem_type == 'classification' and dataset_size < 5000 and n_features > 100",
-          "selected_models": ["LinearSVC", "LogisticRegression", "XGBClassifier"],
-          "justification": "Moderate data but high-dimensional classification → linear + boosting."
-        },
-        {
-          "condition": "problem_type == 'classification' and has_imbalanced_target == true",
-          "selected_models": ["XGBClassifier", "LGBMClassifier", "CatBoostClassifier"],
-          "justification": "Imbalanced classification → boosting models handle imbalance well."
-        },
-        {
-          "condition": "problem_type == 'classification' and dataset_size >= 5000 and n_features < 100",
-          "selected_models": ["RandomForestClassifier", "XGBClassifier", "LGBMClassifier", "CatBoostClassifier"],
-          "justification": "Large dataset classification → tree ensembles scale well."
-        },
-        {
-          "condition": "problem_type == 'classification' and dataset_size >= 20000 and n_features >= 100",
-          "selected_models": ["RandomForestClassifier", "XGBClassifier", "LGBMClassifier", "MLPClassifier"],
-          "justification": "Very large & high-dim classification → strong ensembles or neural networks."
-        },
 
-        {
-          "condition": "problem_type == 'regression' and dataset_size < 2000 and n_features < 20",
-          "selected_models": ["LinearRegression", "Ridge", "Lasso", "ElasticNet", "SVR"],
-          "justification": "Small regression, low-dim → linear models or SVR."
-        },
-        {
-          "condition": "problem_type == 'regression' and dataset_size < 2000 and n_features >= 20 and n_features < 200",
-          "selected_models": ["Lasso", "ElasticNet", "SVR", "RandomForestRegressor"],
-          "justification": "Small regression, moderate-high dim → regularized linear + tree-based."
-        },
-        {
-          "condition": "problem_type == 'regression' and dataset_size < 2000 and n_features >= 200",
-          "selected_models": ["Lasso", "ElasticNet", "SVR", "XGBRegressor"],
-          "justification": "Small regression, very high-dim → regularized linear + boosting."
-        },
-        {
-          "condition": "problem_type == 'regression' and dataset_size >= 2000 and dataset_size < 10000 and n_features <= 50",
-          "selected_models": ["RandomForestRegressor", "XGBRegressor", "LGBMRegressor"],
-          "justification": "Medium regression, low/medium dim → boosting or RF."
-        },
-        {
-          "condition": "problem_type == 'regression' and dataset_size >= 2000 and dataset_size < 10000 and n_features > 50",
-          "selected_models": ["XGBRegressor", "LGBMRegressor", "CatBoostRegressor"],
-          "justification": "Medium regression, high-dim → boosting family preferred."
-        },
-        {
-          "condition": "problem_type == 'regression' and dataset_size >= 10000",
-          "selected_models": ["XGBRegressor", "LGBMRegressor", "CatBoostRegressor", "MLPRegressor"],
-          "justification": "Large regression dataset → strong boosting or NN."
-        },
+    "auto_select": {
+      "enabled": true,
+      "strategy": "performance_first",
+      "meta_fallback": "RandomForest (or KMeans if clustering)",
+      "explanation": true,
+      "justification": {
+        "rules": [
+          {
+            "condition": "problem_type == 'classification' and dataset_size < 1000 and n_features < 20",
+            "selected_models": ["LogisticRegression", "SVC", "KNeighborsClassifier", "DecisionTreeClassifier"],
+            "justification": "Small low-dim classification → simple linear or shallow tree models."
+          },
+          {
+            "condition": "problem_type == 'classification' and dataset_size < 1000 and n_features >= 20",
+            "selected_models": ["LogisticRegression", "LinearSVC", "NaiveBayes"],
+            "justification": "Small high-dim classification → regularized linear or NB."
+          },
+          {
+            "condition": "problem_type == 'classification' and dataset_size < 5000 and n_features > 100",
+            "selected_models": ["LinearSVC", "LogisticRegression", "XGBClassifier"],
+            "justification": "Moderate data, high-dim → linear + boosting."
+          },
+          {
+            "condition": "problem_type == 'classification' and has_imbalanced_target == true",
+            "selected_models": ["XGBClassifier", "LGBMClassifier", "CatBoostClassifier"],
+            "justification": "Imbalanced data → boosting models with class weights."
+          },
+          {
+            "condition": "problem_type == 'classification' and dataset_size >= 5000 and n_features < 100",
+            "selected_models": ["RandomForestClassifier", "XGBClassifier", "LGBMClassifier", "CatBoostClassifier"],
+            "justification": "Large dataset → ensemble tree models."
+          },
+          {
+            "condition": "problem_type == 'classification' and dataset_size >= 20000 and n_features >= 100",
+            "selected_models": ["RandomForestClassifier", "XGBClassifier", "LGBMClassifier", "MLPClassifier"],
+            "justification": "Very large & high-dim → ensembles or neural nets."
+          },
 
-        {
-          "condition": "problem_type == 'clustering' and n_features < 10",
-          "selected_models": ["KMeans", "MiniBatchKMeans"],
-          "justification": "Clustering low-dim → KMeans and MiniBatchKMeans."
-        },
-        {
-          "condition": "problem_type == 'clustering' and n_features >= 10 and n_features <= 100",
-          "selected_models": ["GaussianMixture", "SpectralClustering"],
-          "justification": "Clustering medium-dim → GMM or Spectral clustering."
-        },
-        {
-          "condition": "problem_type == 'clustering' and n_features > 100",
-          "selected_models": ["MiniBatchKMeans", "SpectralClustering", "HDBSCAN"],
-          "justification": "High-dim clustering → scalable + spectral/density-based."
-        },
-        {
-          "condition": "problem_type == 'clustering' and has_arbitrary_shapes == true",
-          "selected_models": ["DBSCAN", "HDBSCAN", "OPTICS"],
-          "justification": "Non-spherical clusters → density-based methods."
-        },
+          {
+            "condition": "problem_type == 'regression' and dataset_size < 2000 and n_features < 20",
+            "selected_models": ["LinearRegression", "Ridge", "Lasso", "ElasticNet", "SVR"],
+            "justification": "Small regression, low-dim → linear or SVR."
+          },
+          {
+            "condition": "problem_type == 'regression' and dataset_size < 2000 and n_features >= 20",
+            "selected_models": ["Lasso", "ElasticNet", "SVR", "RandomForestRegressor"],
+            "justification": "Small regression, high-dim → regularized + tree-based."
+          },
+          {
+            "condition": "problem_type == 'regression' and dataset_size >= 2000 and dataset_size < 10000 and n_features <= 50",
+            "selected_models": ["RandomForestRegressor", "XGBRegressor", "LGBMRegressor"],
+            "justification": "Medium regression, few features → boosting."
+          },
+          {
+            "condition": "problem_type == 'regression' and dataset_size >= 10000",
+            "selected_models": ["XGBRegressor", "LGBMRegressor", "CatBoostRegressor", "MLPRegressor"],
+            "justification": "Large regression → boosting or neural nets."
+          },
 
-        {
-          "condition": "problem_type == 'time_series' and dataset_size < 5000 and has_seasonality == true",
-          "selected_models": ["ARIMA", "SARIMA", "ExponentialSmoothing", "Prophet"],
-          "justification": "Small time series with seasonality → statistical models or Prophet."
-        },
-        {
-          "condition": "problem_type == 'time_series' and dataset_size < 5000 and has_seasonality == false",
-          "selected_models": ["Prophet", "RandomForestRegressor"],
-          "justification": "Small time series without strong seasonality → ML + Prophet."
-        },
-        {
-          "condition": "problem_type == 'time_series' and dataset_size >= 5000 and dataset_size < 20000",
-          "selected_models": ["XGBRegressor", "LGBMRegressor", "Prophet"],
-          "justification": "Medium time series → boosting + Prophet hybrid."
-        },
-        {
-          "condition": "problem_type == 'time_series' and dataset_size >= 20000",
-          "selected_models": ["XGBRegressor", "LGBMRegressor", "LSTM", "GRU", "TCN"],
-          "justification": "Large time series → boosting + deep sequence models."
-        },
+          {
+            "condition": "problem_type == 'time_series' and dataset_size < 5000 and has_seasonality == true",
+            "selected_models": ["ARIMA", "SARIMA", "ExponentialSmoothing", "Prophet"],
+            "justification": "Small seasonal time series → statistical models."
+          },
+          {
+            "condition": "problem_type == 'time_series' and dataset_size >= 5000 and dataset_size < 20000",
+            "selected_models": ["XGBRegressor", "LGBMRegressor", "Prophet"],
+            "justification": "Medium time series → boosting + Prophet."
+          },
+          {
+            "condition": "problem_type == 'time_series' and dataset_size >= 20000",
+            "selected_models": ["XGBRegressor", "LGBMRegressor", "LSTM", "GRU", "TCN"],
+            "justification": "Large time series → deep seq models."
+          },
 
-        {
-          "condition": "problem_type == 'text' and dataset_size < 5000",
-          "selected_models": ["NaiveBayes", "LogisticRegression", "LinearSVC"],
-          "justification": "Small text dataset → simple linear or NB."
-        },
-        {
-          "condition": "problem_type == 'text' and dataset_size >= 5000 and dataset_size < 50000",
-          "selected_models": ["XGBClassifier", "LGBMClassifier", "LinearSVC"],
-          "justification": "Medium text dataset → boosting + linear."
-        },
-        {
-          "condition": "problem_type == 'text' and dataset_size >= 50000",
-          "selected_models": ["Transformer", "BERT", "CNN_Text", "RNN_Text"],
-          "justification": "Large text dataset → deep learning NLP."
+          {
+            "condition": "problem_type == 'clustering' and has_arbitrary_shapes == true",
+            "selected_models": ["DBSCAN", "HDBSCAN", "OPTICS"],
+            "justification": "Non-spherical clusters → density-based."
+          },
+          {
+            "condition": "problem_type == 'text' and dataset_size < 5000",
+            "selected_models": ["NaiveBayes", "LogisticRegression", "LinearSVC"],
+            "justification": "Small text dataset → simple linear/NB."
+          },
+          {
+            "condition": "problem_type == 'text' and dataset_size >= 50000",
+            "selected_models": ["Transformer", "BERT", "CNN_Text", "RNN_Text"],
+            "justification": "Large text dataset → deep learning NLP."
+          }
+        ],
+        "fallback": {
+          "selected_models": ["RandomForest"],
+          "justification": "No rule matched → fallback to RandomForest (or KMeans if clustering)."
         }
-      ],
-      "fallback": {
-        "selected_models": ["RandomForest"],
-        "justification": "No rule matched → fallback to RandomForest (or KMeans if clustering)."
       }
     }
-  }
-
   },
 
   "model_registry": {

@@ -1,4 +1,4 @@
-import pandas as pd
+
 import numpy as np
 import math
 import re
@@ -18,26 +18,50 @@ import torch
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 import warnings
-warnings.filterwarnings("ignore", message="Could not infer format")
-
-
+warnings.filterwarnings("ignore")
 import pandas as pd
 import numpy as np
 
 def downcast_dtypes(df):
     for col in df.select_dtypes(include = ['int']).column:
-        df[col] = pd.to_numberic(df[col], downcast = 'integer')
+        df[col] = pd.to_numeric(df[col], downcast = 'integer')
     for col in df.select_dtypes(include =['float']).column:
         df[col] = pd.to_numeric(df[col], downcast='float')
+
+def infer_date_format(series: pd.Series, top_n: int = 100):
+    """Thử suy luận định dạng datetime phổ biến nhất."""
+    common_formats = [
+        "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y",
+        "%Y/%m/%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S",
+        "%Y/%m/%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z"
+    ]
+    sample = series.dropna().astype(str).head(top_n)
+    success_rate = {}
+    for fmt in common_formats:
+        ok = 0
+        for val in sample:
+            try:
+                pd.to_datetime(val, format=fmt)
+                ok += 1
+            except Exception:
+                pass
+        success_rate[fmt] = ok / len(sample) if len(sample) > 0 else 0
+
+    best_fmt = max(success_rate, key=success_rate.get)
+    if success_rate[best_fmt] >= 0.5:
+        return best_fmt
+    return None
 
 def infer_schema_from_df(df: pd.DataFrame, max_unique_for_enum: int = 20) -> dict:
     props = {}
 
     for col in df.columns:
         series = df[col].dropna()
+        total = len(series)
         dtype = "string"
+        detected_format = None
 
-        # --- Kiểm tra dtype gốc ---
+        # === 1. Kiểm tra dtype gốc ===
         if pd.api.types.is_integer_dtype(series):
             dtype = "integer"
         elif pd.api.types.is_float_dtype(series):
@@ -47,44 +71,77 @@ def infer_schema_from_df(df: pd.DataFrame, max_unique_for_enum: int = 20) -> dic
         elif pd.api.types.is_datetime64_any_dtype(series):
             dtype = "datetime"
         else:
-            # --- fallback: thử parse string ---
-            sample_str = series.astype(str) 
+            # === 2. Thử parse datetime (2 hướng dayfirst) ===
             parsed_success = False
+            sample_str = series.astype(str)
             for dayfirst in [False, True]:
                 try:
                     dt_parsed = pd.to_datetime(sample_str, errors="coerce", dayfirst=dayfirst)
-                    if dt_parsed.notnull().mean() > 0.5:  
+                    if dt_parsed.notnull().mean() > 0.5:
                         dtype = "datetime"
                         parsed_success = True
+                        detected_format = infer_date_format(sample_str)
                         break
                 except Exception:
                     continue
 
             if not parsed_success:
-                # integer regex
+                # === 3. Kiểm tra numeric dạng text ===
                 if sample_str.str.match(r"^-?\d+$").all():
                     dtype = "integer"
-                # float regex
                 elif sample_str.str.match(r"^-?\d+(\.\d+)?$").all():
                     dtype = "number"
+                # === 4. Kiểm tra dạng multi-value hoặc enum ===
+                elif sample_str.str.contains(r"[;,|]").any():
+                    dtype = "multi-select"
+                elif series.nunique() <= max_unique_for_enum:
+                    dtype = "categorical"
                 else:
                     dtype = "string"
 
+        # === 5. Tạo schema property ===
         unique_count = series.nunique()
+        prop = {"type": dtype if dtype not in ["datetime", "multi-select", "categorical"] else "string"}
 
-        # --- Build prop ---
         if dtype == "datetime":
-            prop = {"type": "string", "format": "date-time"}
-        elif dtype == "string" and unique_count <= max_unique_for_enum:
-            prop = {"type": "string", "enum": series.unique().tolist()}
+            prop["format"] = "date-time"
+            if detected_format:
+                prop["pattern"] = detected_format
+            # Thêm metadata ví dụ:
+            dt_col = pd.to_datetime(series, errors="coerce")
+            prop["examples"] = [str(x) for x in dt_col.dropna().head(3).tolist()]
+            prop["min"] = str(dt_col.min()) if not pd.isna(dt_col.min()) else None
+            prop["max"] = str(dt_col.max()) if not pd.isna(dt_col.max()) else None
+
+        elif dtype == "multi-select":
+            prop["description"] = "Multiple values separated by comma, semicolon, or pipe"
+            prop["examples"] = series.head(3).tolist()
+
+        elif dtype == "categorical":
+            prop["enum"] = sorted(series.unique().tolist())
+            prop["examples"] = series.head(3).tolist()
+
+        elif dtype == "number" or dtype == "integer":
+            numeric_col = pd.to_numeric(series, errors="coerce")
+            prop["minimum"] = float(numeric_col.min()) if not pd.isna(numeric_col.min()) else None
+            prop["maximum"] = float(numeric_col.max()) if not pd.isna(numeric_col.max()) else None
+            prop["examples"] = numeric_col.dropna().head(3).tolist()
+
         else:
-            prop = {"type": dtype}
+            prop["examples"] = series.head(3).tolist()
+            avg_len = series.map(len).mean() if len(series) > 0 else 0
+            prop["avg_length"] = avg_len
+
+        # === 6. Metadata chung ===
+        prop["non_null"] = int(series.notnull().sum())
+        prop["nulls"] = int(df[col].isnull().sum())
+        prop["unique_count"] = int(unique_count)
 
         props[col] = prop
 
     schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "GeneratedSchema",
+        "title": "SmartGeneratedSchema",
         "type": "object",
         "properties": props
     }
@@ -171,41 +228,37 @@ def analyze_column(col: pd.Series) -> dict:
     }
 
 def convert_numpy_types(obj):
-    """Recursively convert numpy types to native Python types for JSON serialization."""
-    import numpy as np
-    import pandas as pd
-
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj) if not np.isnan(obj) and np.isfinite(obj) else None
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, pd.Timestamp):
-        return str(obj)
-    elif isinstance(obj, dict):
-        new_dict = {}
-        for key, value in obj.items():
-            if isinstance(key, pd.Timestamp):
-                key = str(key)
-            elif isinstance(key, (np.integer, np.floating)):
-                key = convert_numpy_types(key)
-            new_dict[key] = convert_numpy_types(value)
-        return new_dict
+    if isinstance(obj, dict):
+        return {str(k): convert_numpy_types(v) for k, v in obj.items()}
     elif isinstance(obj, list):
-        return [convert_numpy_types(item) for item in obj]
-    elif pd.api.types.is_scalar(obj):
-        # chỉ check NaN cho scalar
-        return None if pd.isna(obj) else obj
+        return [convert_numpy_types(v) for v in obj]
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        if np.isnan(obj) or not np.isfinite(obj):
+            return None
+        return float(obj)
+    elif isinstance(obj, (np.bool_, np.bool8)):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return convert_numpy_types(obj.tolist())
     elif isinstance(obj, pd.Series):
-        return obj.tolist()
+        return convert_numpy_types(obj.tolist())
     elif isinstance(obj, pd.DataFrame):
-        return obj.to_dict(orient="records")
-    return obj
+        return convert_numpy_types(obj.to_dict(orient="records"))
+    elif isinstance(obj, (pd.Timestamp, np.datetime64)):
+        return str(obj)
+    elif obj is pd.NA:
+        return None
+    elif pd.api.types.is_scalar(obj):
+        if pd.isna(obj) or obj == np.inf or obj == -np.inf:
+            return None
+        return obj
+    else:
+        return obj
+
 
 def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str] = None) -> dict:
-    """Comprehensive Data Inspection (Bước 2) — returns detailed diagnostics with target-aware correlation."""
-
     total_rows, total_cols = df.shape
     head = df.head(max_sample).to_dict(orient="records")
     tail = df.tail(max_sample).to_dict(orient="records")
@@ -288,6 +341,9 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str
         numeric_stats, outlier_count, skew, kurt, zero_count = None, None, None, None, None
         if num_parsed_pct > 0.5:
             num_series = pd.to_numeric(col_series, errors="coerce").dropna()
+            if num_series.dtype == bool:
+                num_series = num_series.astype(int)
+                
             if len(num_series) > 0:
                 q1, q3 = float(num_series.quantile(0.25)), float(num_series.quantile(0.75))
                 iqr = q3 - q1
@@ -1025,6 +1081,13 @@ def analyze_timeseries(df, freq="D"):
 
 #incase using vilm/vinallama-2.7b please change this function name to generate_business_report_template 
 def generate_business_report(eda_results: dict) -> str: 
+    def safe_float(x, default=0.0):
+        try:
+            if x is None or (isinstance(x, float) and math.isnan(x)):
+                return default
+            return float(x)
+        except Exception:
+            return default
     sections = []
 
     summary = "📌 Executive Summary\n"
@@ -1040,11 +1103,11 @@ def generate_business_report(eda_results: dict) -> str:
     missing_summary = inspection.get("missing_summary", {})
     pct_missing = missing_summary.get("percent_missing", 0)
     if pct_missing > 0.1:
-        summary += f"- ⚠️ Dữ liệu thiếu đáng kể (~{pct_missing*100:.1f}%) → cần xử lý trước khi phân tích sâu.\n"
+        summary += f"- Dữ liệu thiếu đáng kể (~{pct_missing*100:.1f}%) → cần xử lý trước khi phân tích sâu.\n"
     elif pct_missing > 0:
-        summary += f"- ⚠️ Một số giá trị bị thiếu (~{pct_missing*100:.1f}%), nên kiểm tra nguyên nhân.\n"
+        summary += f"- Một số giá trị bị thiếu (~{pct_missing*100:.1f}%), nên kiểm tra nguyên nhân.\n"
     else:
-        summary += "- ✅ Dữ liệu đầy đủ — không có giá trị bị thiếu.\n"
+        summary += "- Dữ liệu đầy đủ — không có giá trị bị thiếu.\n"
 
     # 3️⃣ Clustering / Segmentation
     advanced = eda_results.get("advanced", {})
@@ -1053,13 +1116,13 @@ def generate_business_report(eda_results: dict) -> str:
         centroids = cluster_info.get("centroids", [])
         n_clusters = len(centroids)
         silhouette = cluster_info.get("silhouette_score", 0)
-        summary += f"- 👥 Phân tích phân cụm phát hiện {n_clusters} nhóm chính (điểm silhouette = {silhouette:.3f} → cấu trúc rõ ràng).\n"
+        summary += f"- Phân tích phân cụm phát hiện {n_clusters} nhóm chính (điểm silhouette = {silhouette:.3f} → cấu trúc rõ ràng).\n"
         for i, c in enumerate(centroids):
             # Lấy đặc trưng nổi bật (giá trị trung tâm)
             top_features = ", ".join(f"{k}≈{round(v,2)}" for k, v in c.items() if isinstance(v, (int, float)))
             summary += f"    Nhóm {i+1}: đặc trưng bởi {top_features}\n"
     else:
-        summary += "- ℹ️ Không thực hiện phân cụm hoặc dữ liệu không phù hợp để phân nhóm.\n"
+        summary += "- Không thực hiện phân cụm hoặc dữ liệu không phù hợp để phân nhóm.\n"
 
     # 4️⃣ Time series trends
     ts_info = advanced.get("timeseries", {})
@@ -1207,7 +1270,9 @@ def generate_business_report(eda_results: dict) -> str:
 
     if sig.get("anova"):
         for key, stats in sig["anova"].items():
-            if stats.get("p_value", 1) < 0.05:
+            p_val = safe_float(stats.get("p_value"), 1.0)
+            eta2 = safe_float(stats.get("eta_squared"), 0.0)
+            if p_val < 0.05:
                 cat, num = key.split("__vs__")
                 p_val = stats.get("p_value", 0)
                 eta2 = stats.get("eta_squared", 0)
@@ -1254,7 +1319,10 @@ def generate_business_report(eda_results: dict) -> str:
     relationships_cat = eda_results.get("relationships", {}).get("categorical_vs_categorical", {})
     if sig.get("chi2"):
         for key, stats in sig["chi2"].items():
-            if stats.get("p_value", 1) < 0.05:
+            p_val = safe_float(stats.get("p_value"), 1.0)
+            cramers_v = safe_float(stats.get("cramers_v"), 0.0)
+
+            if p_val < 0.05:
                 c1, c2 = key.split("__vs__")
                 p_val = stats.get("p_value", 0)
                 cramers_v = stats.get("cramers_v", 0)
@@ -1291,9 +1359,6 @@ def generate_business_report(eda_results: dict) -> str:
                     insights += f"   → (Dữ liệu kết hợp chi tiết chưa được cung cấp — vui lòng đảm bảo 'relationships' được tính trong EDA.)\n"
     sections.append(insights)
 
-    # =====================================================
-    # 4. Risks & Opportunities
-    # =====================================================
     risks = "⚠️ Risks & Opportunities\n"
 
     # Multicollinearity
@@ -1315,9 +1380,6 @@ def generate_business_report(eda_results: dict) -> str:
 
     sections.append(risks)
 
-    # =====================================================
-    # 5. Strategic Recommendations
-    # =====================================================
     rec = "💡 Strategic Recommendations\n\n"
 
     # --- 1. Ngắn hạn: Dựa trên Data Quality Issues ---
@@ -1372,7 +1434,7 @@ def generate_business_report(eda_results: dict) -> str:
     anova_results = significance.get("anova", {})
     strong_anova = [
         key for key, stats in anova_results.items()
-        if stats.get("p_value", 1) < 0.05 and stats.get("eta_squared", 0) >= 0.06
+        if p_val < 0.05 and stats.get("eta_squared", 0) >= 0.06
     ]
     if strong_anova:
         cat, num = strong_anova[0].split("__vs__")
@@ -1382,7 +1444,7 @@ def generate_business_report(eda_results: dict) -> str:
     chi2_results = significance.get("chi2", {})
     strong_chi2 = [
         key for key, stats in chi2_results.items()
-        if stats.get("p_value", 1) < 0.05 and stats.get("cramers_v", 0) >= 0.3
+        if p_val < 0.05 and stats.get("cramers_v", 0) >= 0.3
     ]
     if strong_chi2:
         c1, c2 = strong_chi2[0].split("__vs__")
@@ -1450,9 +1512,6 @@ def generate_business_report(eda_results: dict) -> str:
 
     sections.append(rec)
 
-    # =====================================================
-    # 6. Appendix (Technical Notes)
-    # =====================================================
     appendix = "📑 Appendix / Technical Notes\n"
     appendix += "- Phân tích được thực hiện tự động (Auto EDA + Significance Tests + Clustering).\n"
     appendix += "- Các thuật toán: ANOVA, Chi2-test, Isolation Forest, K-Means, VIF.\n"

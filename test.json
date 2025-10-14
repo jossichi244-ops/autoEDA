@@ -1,0 +1,1277 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SmartContract",
+  "type": "object",
+  "properties": {
+    "Address": {
+      "type": "string"
+      
+    },
+    "Appearance": {
+      "type": "string"
+    },
+    "Boiling Point": {
+      "type": "number"
+    },
+    "Chemical Stability": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Chemical Stability"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Chemical Stability_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Conditions to Avoid": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Conditions to Avoid"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Conditions to Avoid_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Date of Preparation": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Date of Preparation"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Date of Preparation_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Emergency Contact Number": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Emergency Contact Number"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Emergency Contact Number_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Engineering Controls": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Engineering Controls"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Engineering Controls_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Flash Point": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Flash Point"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Flash Point_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Handling Precautions": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Handling Precautions"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Handling Precautions_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Hazard Statements": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Hazard Statements"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Hazard Statements_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Hazardous Decomposition Products": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Hazardous Decomposition Products"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Hazardous Decomposition Products_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Incompatible Materials": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Incompatible Materials"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Incompatible Materials_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Manufacturer": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Manufacturer"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Manufacturer_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Melting Point": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Melting Point"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Melting Point_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Odor": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Odor"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Odor_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Packing Group": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Packing Group"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Packing Group_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Personal Protective Equipment": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Personal Protective Equipment"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Personal Protective Equipment_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Precautionary Statements": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Precautionary Statements"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Precautionary Statements_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Product Code": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Product Code"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Product Code_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Product Name": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Product Name"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Product Name_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Proper Shipping Name": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Proper Shipping Name"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Proper Shipping Name_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Purpose": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Purpose"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Purpose_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Revision Date": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Revision Date"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Revision Date_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Signal Word": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Signal Word"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Signal Word_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Special Protective Equipment for Firefighters": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Special Protective Equipment for Firefighters"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Special Protective Equipment for Firefighters_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Specific Gravity": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Specific Gravity"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Specific Gravity_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Storage Requirements": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Storage Requirements"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Storage Requirements_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Suitable Extinguishing Media": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Suitable Extinguishing Media"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Suitable Extinguishing Media_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "Transport Hazard Class": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Transport Hazard Class"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "Transport Hazard Class_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    },
+    "UN Number": {
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "UN Number"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "UN Number_output"
+                },
+                "solidityType": {
+                  "type": "string",
+                  "example": "string"
+                }
+              }
+            }
+          ]
+        },
+        "stateMutability": {
+          "type": "string",
+          "example": "view"
+        }
+      }
+    }
+  }
+}

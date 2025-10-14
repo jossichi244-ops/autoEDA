@@ -3,6 +3,8 @@ from fastapi import  UploadFile, HTTPException
 import pandas as pd
 from io import BytesIO
 import json
+from copy import deepcopy
+from collections import defaultdict
 from typing import List, Optional, Tuple, Dict, Any, Union
 from sklearn.model_selection import train_test_split
 import joblib
@@ -45,7 +47,9 @@ from prophet import Prophet
 # from tensorflow.keras.models import Sequential
 # from tensorflow.keras.layers import Dense, SimpleRNN, LSTM, GRU, Input, Conv1D, GlobalMaxPooling1D, Embedding
 
-from tcn import TCN 
+from tcn import TCN
+
+from modules.eda import infer_schema_from_df 
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,60 +74,101 @@ async def read_file_to_df(file: UploadFile) -> pd.DataFrame:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading file: {e}")
 
-def detect_data_types(df: pd.DataFrame, detection_config: Dict[str, Any]) -> Dict[str, str]:
-    detected = {}
+def detect_data_types(df: pd.DataFrame, detection_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    if detection_config is None:
+        detection_config = {
+            "time_series": {"enabled": True},
+            "numeric": {"enabled": True},
+            "categorical": {"enabled": True},
+            "text": {"enabled": True},
+            "id_like": {"enabled": True, "unique_ratio_threshold": 0.9},
+            "boolean": {"enabled": True},
+        }
 
-    for col in df.columns:
-        col_dtype = df[col].dtype
+    # --- 2️⃣ Sinh schema cơ bản từ dữ liệu ---
+    base_schema = infer_schema_from_df(df)
+    schema = deepcopy(base_schema)
+    detected_types = {}
+    meta_summary = defaultdict(dict)
 
-        # --- Time series detection ---
-        if detection_config["time_series"]["enabled"]:
-            # Nếu dtype đã là datetime
-            if pd.api.types.is_datetime64_any_dtype(col_dtype):
-                detected[col] = "time_series"
-                continue
+    for col, props in schema["properties"].items():
+        series = df[col]
+        n_rows = len(series)
+        n_nonnull = props.get("non_null", series.notna().sum())
+        n_nulls = props.get("nulls", series.isna().sum())
+        unique_count = props.get("unique_count", series.nunique())
+        dtype = props.get("type", "string")
+        avg_len = props.get("avg_length", 0) if props.get("avg_length") else series.dropna().astype(str).map(len).mean()
 
-            # Nếu là object/string nhưng parse được sang datetime
-            if col_dtype == "object":
-                for dayfirst in [True, False]:
-                    try:
-                        parsed = pd.to_datetime(df[col], errors="coerce", dayfirst=dayfirst)
-                        if parsed.notna().mean() > 0.5:
-                            detected[col] = "time_series"
-                            break  # thoát ngay khi parse được
-                    except Exception:
-                        continue
-                if detected.get(col) == "time_series":
-                    continue
+        # --- Meta thống kê ---
+        meta_summary[col] = {
+            "non_null": n_nonnull,
+            "nulls": n_nulls,
+            "non_null_ratio": round(n_nonnull / max(n_rows,1), 3),
+            "unique_count": unique_count,
+            "unique_ratio": round(unique_count / max(n_rows,1),3),
+            "dtype_inferred": dtype,
+            "examples": props.get("examples", []),
+        }
 
-        # --- Numeric detection ---
-        if detection_config["numeric"]["enabled"]:
-            if col_dtype.name in detection_config["numeric"]["criteria"]:
-                detected[col] = "numeric"
-                continue
+        detected_type = None
+        role = None
 
-        # --- Categorical detection ---
-        if detection_config["categorical"]["enabled"]:
-            if col_dtype.name in detection_config["categorical"]["criteria"]:
-                detected[col] = "categorical"
-                continue
+        # --- 1️⃣ ID-like detection (trước numeric!) ---
+        if detection_config.get("id_like", {}).get("enabled", False):
+            unique_ratio = unique_count / max(n_rows,1)
+            if unique_ratio >= detection_config["id_like"].get("unique_ratio_threshold",0.9):
+                detected_type = "id_like"
+                role = "id"
 
-        # --- Text detection ---
-        if detection_config["text"]["enabled"]:
-            try:
-                sample_vals = df[col].dropna().astype(str).sample(min(100, len(df[col])), random_state=42)
-                avg_len = sample_vals.str.len().mean()
-                avg_tokens = sample_vals.str.split().map(len).mean()
-                if avg_len > 50 and avg_tokens > 5:
-                    detected[col] = "text"
-                    continue
-            except Exception:
-                pass
+        # --- 2️⃣ Time series detection ---
+        if detected_type is None and detection_config["time_series"]["enabled"]:
+            if props.get("format") == "date-time" or (props.get("pattern") and "date" in str(props.get("pattern")).lower()):
+                detected_type = "time_series"
+                role = "time_index"
 
-        # --- Default: categorical ---
-        detected[col] = "categorical"
+        # --- 3️⃣ Boolean detection ---
+        if detected_type is None and detection_config.get("boolean",{}).get("enabled",False):
+            unique_vals = series.dropna().unique()
+            if set(unique_vals).issubset({0,1}) or set(unique_vals).issubset({True,False}):
+                detected_type = "boolean"
+                role = "categorical"
 
-    return detected
+        # --- 4️⃣ Numeric detection ---
+        if detected_type is None and detection_config.get("numeric",{}).get("enabled",False):
+            if dtype in ["integer","number"]:
+                detected_type = "numeric"
+                role = "numeric"
+
+        # --- 5️⃣ Text detection ---
+        if detected_type is None and detection_config.get("text",{}).get("enabled",False):
+            vocab_size = unique_count
+            if avg_len > 50 or vocab_size > 100:
+                detected_type = "text"
+                role = "text"
+            else:
+                detected_type = "categorical"
+                role = "categorical"
+
+        # --- 6️⃣ Default fallback ---
+        if detected_type is None:
+            detected_type = "categorical"
+            role = "categorical"
+
+        # --- Cập nhật ---
+        detected_types[col] = detected_type
+        meta_summary[col]["reason"] = f"auto-detected as {detected_type}"
+
+        schema["properties"][col]["semantic_type"] = detected_type
+        schema["properties"][col]["role"] = role
+        schema["properties"][col]["data_type_detected"] = detected_type
+        schema["properties"][col]["avg_len"] = avg_len
+
+    return {
+        "detected_types": detected_types,
+        # "schema": schema,
+        "meta_summary": dict(meta_summary)
+    }
 
 def preprocess_data(
     df: pd.DataFrame, 
@@ -372,34 +417,43 @@ def feature_selection(
     return df_fs, log
 
 def auto_detect_target(df: pd.DataFrame, detected_types: Dict[str, str]) -> List[str]:
-    candidate_cols = [c for c in df.columns if "cluster" not in c.lower()]
-    
+    if not detected_types:
+        return []
+
+    # --- Loại bỏ cluster và cột không có trong detected_types ---
+    candidate_cols = [c for c in df.columns if "cluster" not in str(c).lower() and c in detected_types]
+
     numeric_cols = [c for c in candidate_cols if detected_types.get(c) == "numeric"]
     categorical_cols = [c for c in candidate_cols if detected_types.get(c) == "categorical"]
 
     targets = []
 
-    # 1. Numeric liên tục (nhiều giá trị) → regression target
+    # 1️⃣ Numeric liên tục → regression
     for c in numeric_cols:
         if df[c].nunique() > 20:
             targets.append(c)
 
-    # 2. Categorical có số lớp nhỏ (2–10) → classification target
+    # 2️⃣ Categorical 2–10 lớp → classification
     for c in categorical_cols:
         nunique = df[c].nunique()
         if 2 <= nunique <= 10:
             targets.append(c)
 
-    # 3. Trường hợp chỉ có 1 cột numeric → có thể là target
+    # 3️⃣ Nếu chỉ có 1 numeric → target
     if len(numeric_cols) == 1 and numeric_cols[0] not in targets:
         targets.append(numeric_cols[0])
 
-    # 4. Trường hợp chỉ có 1 categorical với số lớp nhỏ → có thể là target
+    # 4️⃣ Nếu chỉ có 1 categorical 2–10 lớp → target
     if len(categorical_cols) == 1:
         c = categorical_cols[0]
         nunique = df[c].nunique()
         if 2 <= nunique <= 10 and c not in targets:
             targets.append(c)
+
+    # 5️⃣ Fallback: chọn numeric nhiều unique nhất nếu vẫn trống
+    if not targets and numeric_cols:
+        most_unique = max(numeric_cols, key=lambda c: df[c].nunique())
+        targets.append(most_unique)
 
     return targets
 
@@ -924,7 +978,8 @@ async def predict_from_df(df: pd.DataFrame, target_col: str = None) -> Dict[str,
     print("Received data for prediction")
 
     # --- Step 1: Detect types ---
-    detected_types = detect_data_types(df, pipeline_config["data_type_detection"])
+    detected_info = detect_data_types(df, pipeline_config["data_type_detection"])
+    detected_types = detected_info["detected_types"]
 
     # --- Step 2: Preprocessing ---
     df_processed, preprocessing_log, updated_types = preprocess_data(
@@ -976,9 +1031,8 @@ async def predict_from_df(df: pd.DataFrame, target_col: str = None) -> Dict[str,
         "feature_selection_log": fs_log,
         "model_selection_log": model_selection_log,
         # "training_results": training_results,
-        # "processed_data_preview": df_fs.head(5).to_dict(orient="records"),
+        "processed_data_preview": df_fs.head(5).to_dict(orient="records"),
     }
-
 
 ##=================
 # def powerset(iterable):
