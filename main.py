@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from modules.beyond_eda import beyond_eda
 from modules.eda import analyze_column, clean_dataset, convert_numpy_types, descriptive_statistics, extract_eda_insights, generate_advanced_eda, generate_business_report, generate_relationships, generate_visualizations, infer_schema_from_df, inspect_dataset
-from modules.ocr import extract_fields_from_text, infer_schema_from_ocr_fields, process_docx, process_image, process_pdf
+# from modules.ocr import extract_fields_from_text, infer_schema_from_ocr_fields, process_docx, process_image, process_pdf
 from modules.prediction import auto_detect_target, detect_data_types, predict_from_df, read_file_to_df
 import os
 from dotenv import load_dotenv
@@ -19,6 +19,8 @@ import logging
 import warnings
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 from datetime import datetime
+from typing import List, Dict
+from fastapi import Body
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -143,6 +145,102 @@ async def parse_file(file: UploadFile = File(...)):
         media_type="application/json"
     )
 
+@app.post("/api/ingest-file")
+async def parse_file(data: List[Dict] = Body(...)):
+    start_time = datetime.now()
+
+    # ✅ PRINT DỮ LIỆU CLIENT GỬI
+    print("Total rows received:", len(data))
+    if len(data) > 0:
+        print("First row from client:")
+        print(data[0])
+    else:
+        print("Client sent empty data")
+
+    # ✅ BUILD DATAFRAME
+    df = pd.DataFrame(data)
+
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.map(lambda x: None if isinstance(x, float) and np.isnan(x) else x)  
+
+    schema = infer_schema_from_df(df)
+    
+    preview = df.head(10).to_dict(orient="records")
+    understanding = []
+    for col in df.columns:
+        understanding.append(analyze_column(df[col]))
+    
+    # Step 2: Detailed Inspection
+    inspection = inspect_dataset(df, max_sample=10)
+    
+    cleaned_result = clean_dataset(df, important_cols=[])
+    preview = cleaned_result["cleaned_preview"]  
+
+    descriptive = descriptive_statistics(df)
+
+    visualizations = generate_visualizations(df)
+
+    relationships = generate_relationships(df)
+
+    advanced = generate_advanced_eda(df)
+    print("parse_file: Running beyond_eda() for advanced analysis")
+    try:
+        advanced_analysis = beyond_eda(df)
+    except Exception as e:
+        advanced_analysis = {"error": str(e)}
+    file_summary = {
+        "all_columns": df.columns.tolist(),
+        "numeric_columns": list(descriptive["numeric"].keys()),
+        "categorical_columns": list(descriptive["categorical"].keys()),
+        "datetime_columns": list(descriptive["datetime"].keys()),
+        "categorical_unique_counts": {
+            col: int(df[col].nunique())
+            for col in descriptive["categorical"].keys()
+        },
+        "row_count": int(len(df)),
+        "column_count": int(len(df.columns)),
+    }
+    # print("parse_file: Sending data to run_prediction for forecasting")
+    # prediction_result = await predict_from_df(df)
+    # print("parse_file: Received prediction result")
+    end_time = datetime.now()
+    total_time = (end_time - start_time).total_seconds()
+    result = {
+        "schema": schema,
+        "preview": preview,
+        "understanding": understanding,
+        "inspection": inspection,
+        "cleaning": cleaned_result, 
+        "descriptive": descriptive,
+        "visualizations": visualizations,
+        "relationships": relationships,
+        "advanced": advanced,
+        "advanced_analysis": advanced_analysis,
+        "file_summary": file_summary, 
+        "analysis_timing": {
+            "time_receive_data": start_time.isoformat(),
+            "time_done_analysis": end_time.isoformat(),
+            "total_seconds": total_time
+        }
+    }
+
+    insights = extract_eda_insights(result)
+
+    result["insights"] = insights
+    
+    business_report = generate_business_report(result)
+
+    result["business_report"] = business_report
+
+   
+
+    cleaned = convert_numpy_types(result)
+    # cleaned["prediction_result"] = prediction_result
+    return JSONResponse(
+        content=cleaned,
+        media_type="application/json"
+    )
+
 @app.get("/api/health")
 def health():
     return {
@@ -187,46 +285,46 @@ async def run_prediction(file: UploadFile = File(...), target: str = Form(None))
     ]
     return result
 
-@app.post("/api/ocr")
-async def ocr_file(file: UploadFile = File(...)):
-    name = file.filename.lower()
-    logger.info(f"📥 Received file: {name}")
+# @app.post("/api/ocr")
+# async def ocr_file(file: UploadFile = File(...)):
+#     name = file.filename.lower()
+#     logger.info(f"📥 Received file: {name}")
 
-    try:
-        content = await file.read()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error reading file: {e}")
+#     try:
+#         content = await file.read()
+#     except Exception as e:
+#         raise HTTPException(status_code=400, detail=f"Error reading file: {e}")
 
-    # --- OCR STEP ---
-    try:
-        if name.endswith((".jpg", ".jpeg", ".png")):
-            ocr_result = process_image(content)
-        elif name.endswith(".pdf"):
-            ocr_result = process_pdf(content)
-        elif name.endswith((".docx", ".doc")):
-            ocr_result = process_docx(content)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OCR processing failed: {e}")
+#     # --- OCR STEP ---
+#     try:
+#         if name.endswith((".jpg", ".jpeg", ".png")):
+#             ocr_result = process_image(content)
+#         elif name.endswith(".pdf"):
+#             ocr_result = process_pdf(content)
+#         elif name.endswith((".docx", ".doc")):
+#             ocr_result = process_docx(content)
+#         else:
+#             raise HTTPException(status_code=400, detail="Unsupported file format")
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"OCR processing failed: {e}")
 
-    try:
-        text_content = ocr_result.get("text", "")
-        fields_info = extract_fields_from_text(text_content) or {}
-        schema = infer_schema_from_ocr_fields(fields_info)
+#     try:
+#         text_content = ocr_result.get("text", "")
+#         fields_info = extract_fields_from_text(text_content) or {}
+#         schema = infer_schema_from_ocr_fields(fields_info)
 
-        # ✅ In schema ra terminal hoặc log
-        print("📄 ====== GENERATED JSON SCHEMA ======")
-        print(json.dumps(schema, indent=2, ensure_ascii=False))
-        print("=====================================")
+#         # ✅ In schema ra terminal hoặc log
+#         print("📄 ====== GENERATED JSON SCHEMA ======")
+#         print(json.dumps(schema, indent=2, ensure_ascii=False))
+#         print("=====================================")
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Field extraction failed: {e}")
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Field extraction failed: {e}")
 
-    # --- RETURN ---
-    return JSONResponse(content={
-        "ocr_result": ocr_result,
-        "fields_detected": fields_info.get("fields", []),
-        "unmatched_lines": fields_info.get("unmatched", []),
-        "schema_suggested": schema
-    })
+#     # --- RETURN ---
+#     return JSONResponse(content={
+#         "ocr_result": ocr_result,
+#         "fields_detected": fields_info.get("fields", []),
+#         "unmatched_lines": fields_info.get("unmatched", []),
+#         "schema_suggested": schema
+#     })

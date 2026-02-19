@@ -28,6 +28,12 @@ def downcast_dtypes(df):
     for col in df.select_dtypes(include =['float']).column:
         df[col] = pd.to_numeric(df[col], downcast='float')
 
+def normalize_nulls(series: pd.Series):
+    return series.replace(
+        ["", " ", "  ", "NA", "N/A", "null", "NULL", "-", "--"],
+        np.nan
+    )
+
 def infer_date_format(series: pd.Series, top_n: int = 100):
     """Thử suy luận định dạng datetime phổ biến nhất."""
     common_formats = [
@@ -129,7 +135,8 @@ def infer_schema_from_df(df: pd.DataFrame, max_unique_for_enum: int = 20) -> dic
 
         else:
             prop["examples"] = series.head(3).tolist()
-            avg_len = series.map(len).mean() if len(series) > 0 else 0
+            avg_len = series.astype(str).map(len).mean() if len(series) > 0 else 0
+
             prop["avg_length"] = avg_len
 
         # === 6. Metadata chung ===
@@ -153,44 +160,59 @@ def shannon_entropy(values):
     return -(freq * np.log2(freq + 1e-9)).sum()
 
 def analyze_column(col: pd.Series) -> dict:
-    series = col.dropna().astype(str)
+    # 1. Chuẩn bị dữ liệu sạch để check
+    col = normalize_nulls(col)
+    series_dropped = col.dropna()
+    series_str = series_dropped.astype(str)
+    
+    unique_count = col.nunique()
+    total = len(col)
     dtype = "text"
-    unique_count = series.nunique()
-    total = len(series)
 
-    # numeric
+    # === BƯỚC 1: Check Dtype gốc của Pandas ===
     if pd.api.types.is_integer_dtype(col) or pd.api.types.is_float_dtype(col):
         dtype = "numeric"
-
-    # datetime (cột vốn đã là datetime)
     elif pd.api.types.is_datetime64_any_dtype(col):
         dtype = "datetime"
+    
+    # === BƯỚC 2: Nếu chưa ra, thử Parse String ===
     else:
-        # === Thử parse datetime với cả dayfirst=True và False ===
-        parsed_success = False
-        for dayfirst in [False, True]:
-            try:
-                dt_parsed = pd.to_datetime(series, errors="coerce", dayfirst=dayfirst)
-                if dt_parsed.notnull().mean() > 0.5:
-                    dtype = "datetime"
-                    parsed_success = True
-                    break
-            except Exception:
-                continue
+        # 2.1 Check Boolean (True/False strings)
+        if series_str.str.lower().isin(['true', 'false', '0', '1']).all() and unique_count <= 2:
+             dtype = "boolean"
+             
+        # 2.2 Check Numeric dạng String (QUAN TRỌNG: Check cái này trước Categorical)
+        # Dùng to_numeric với coerce để xem tỷ lệ chuyển đổi thành công
+        elif len(series_dropped) > 0:
+            numeric_converted = pd.to_numeric(series_dropped, errors='coerce')
+            # Nếu > 90% dữ liệu chuyển được sang số -> là Numeric
+            numeric_ratio = numeric_converted.notnull().mean()
 
-        if not parsed_success:
-            # fallback sang categorical/text
-            if unique_count <= 50 or unique_count < 0.05 * total:
+            if numeric_ratio > 0.6:
+                dtype = "numeric"
+                col = numeric_converted 
+
+        # 2.3 Check Datetime (như code cũ của bạn)
+        if dtype == "text": # Chỉ check nếu chưa phải numeric
+            parsed_success = False
+            for dayfirst in [False, True]:
+                try:
+                    dt_parsed = pd.to_datetime(series_dropped, errors="coerce", dayfirst=dayfirst)
+                    if dt_parsed.notnull().mean() > 0.8: # Hạ ngưỡng xuống hoặc check kỹ hơn
+                        dtype = "datetime"
+                        parsed_success = True
+                        break
+                except Exception:
+                    continue
+
+        # 2.4 Check Categorical (Chỉ check sau khi đã chắc chắn không phải số hay ngày)
+        if dtype == "text":
+            if unique_count <= 50 or (total > 100 and unique_count < 0.05 * total):
                 dtype = "categorical"
-            elif (
-                series.str.contains(r"[;,|]").any() or
-                (unique_count > 50 and shannon_entropy(series) < math.log2(unique_count) * 0.3)
-            ):
+            elif series_str.str.contains(r"[;,|]").any():
                 dtype = "multi-select"
-            else:
-                dtype = "text"
 
-    # Stats (giữ nguyên phần còn lại)
+    # === Stats Calculation (Phần này giữ nguyên hoặc tuỳ chỉnh) ===
     stats = {}
     if dtype == "numeric":
         numeric_col = pd.to_numeric(col, errors="coerce")
@@ -200,10 +222,10 @@ def analyze_column(col: pd.Series) -> dict:
             "mean": convert_numpy_types(numeric_col.mean()),
             "std": convert_numpy_types(numeric_col.std()),
         }
-    elif dtype in ("categorical", "multi-select"):
+    elif dtype == "categorical":
         stats = {
             "unique_values": convert_numpy_types(unique_count),
-            "top_values": convert_numpy_types(series.value_counts().head(5).to_dict())
+            "top_values": convert_numpy_types(col.value_counts().head(5).to_dict())
         }
     elif dtype == "datetime":
         dt_col = pd.to_datetime(col, errors="coerce")
@@ -212,10 +234,10 @@ def analyze_column(col: pd.Series) -> dict:
             "max_date": str(dt_col.max()) if not pd.isna(dt_col.max()) else None
         }
     else:  # text
-        str_lengths = series.map(len)
+        str_lengths = series_dropped.map(len) if len(series_dropped) > 0 else pd.Series([0])
         stats = {
             "avg_length": convert_numpy_types(str_lengths.mean()),
-            "sample_values": convert_numpy_types(series.head(5).tolist())
+            "sample_values": convert_numpy_types(series_dropped.head(5).tolist())
         }
 
     return {
@@ -223,10 +245,9 @@ def analyze_column(col: pd.Series) -> dict:
         "inferred_type": dtype,
         "non_null": convert_numpy_types(col.notnull().sum()),
         "nulls": convert_numpy_types(col.isnull().sum()),
-        "example": convert_numpy_types(series.head(3).tolist()),
+        "example": convert_numpy_types(series_dropped.head(3).tolist()),
         "stats": stats
     }
-
 def convert_numpy_types(obj):
     if isinstance(obj, dict):
         return {str(k): convert_numpy_types(v) for k, v in obj.items()}
@@ -238,7 +259,7 @@ def convert_numpy_types(obj):
         if np.isnan(obj) or not np.isfinite(obj):
             return None
         return float(obj)
-    elif isinstance(obj, (np.bool_, np.bool8)):
+    elif isinstance(obj, (np.bool_, np.bool)):
         return bool(obj)
     elif isinstance(obj, np.ndarray):
         return convert_numpy_types(obj.tolist())
