@@ -4,10 +4,11 @@ import json
 from fastapi import FastAPI,File, Form, HTTPException, UploadFile, logger
 from fastapi.responses import JSONResponse
 from flask import app
+import httpx
 import numpy as np
 import pandas as pd
 from modules.beyond_eda import beyond_eda
-from modules.eda import analyze_column, clean_dataset, convert_numpy_types, descriptive_statistics, extract_eda_insights, generate_advanced_eda, generate_business_report, generate_relationships, generate_visualizations, infer_schema_from_df, inspect_dataset
+from modules.eda import analyze_column, clean_dataset, convert_numpy_types, descriptive_statistics, extract_eda_insights, generate_advanced_eda, generate_business_report, generate_relationships, generate_visualizations, infer_schema_from_df, inspect_dataset, standardize_dataframe_types
 # from modules.ocr import extract_fields_from_text, infer_schema_from_ocr_fields, process_docx, process_image, process_pdf
 from modules.prediction import auto_detect_target, detect_data_types, predict_from_df, read_file_to_df
 import os
@@ -130,7 +131,8 @@ async def parse_file(file: UploadFile = File(...)):
     business_report = generate_business_report(result)
 
     result["business_report"] = business_report
-
+    print("schema:", schema)
+    print("inspection:", inspection)
     print("All columns:", df.columns.tolist())
     print("Numeric cols:", list(descriptive["numeric"].keys()))
     print("Categorical cols:", list(descriptive["categorical"].keys()))
@@ -157,13 +159,22 @@ async def parse_file(data: List[Dict] = Body(...)):
     else:
         print("Client sent empty data")
 
-    # ✅ BUILD DATAFRAME
-    df = pd.DataFrame(data)
+     # =============================
+    # 1️⃣ BUILD DATAFRAME
+    # =============================
+    df_raw = pd.DataFrame(data)
 
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.map(lambda x: None if isinstance(x, float) and np.isnan(x) else x)  
+    df_raw = df_raw.replace([np.inf, -np.inf], np.nan)
+    df_raw = df_raw.map(
+        lambda x: None if isinstance(x, float) and np.isnan(x) else x
+    )
 
-    schema = infer_schema_from_df(df)
+    # =============================
+    # 2️⃣ ENTERPRISE STANDARDIZATION (CRITICAL STEP)
+    # =============================
+    df, detected_schema = standardize_dataframe_types(df_raw)
+
+    schema = infer_schema_from_df(df, type_info=detected_schema)
     
     preview = df.head(10).to_dict(orient="records")
     understanding = []
@@ -199,6 +210,7 @@ async def parse_file(data: List[Dict] = Body(...)):
         },
         "row_count": int(len(df)),
         "column_count": int(len(df.columns)),
+        "detected_schema": detected_schema,
     }
     # print("parse_file: Sending data to run_prediction for forecasting")
     # prediction_result = await predict_from_df(df)
@@ -232,10 +244,29 @@ async def parse_file(data: List[Dict] = Body(...)):
 
     result["business_report"] = business_report
 
-   
+    # SEND TO NODE
+    node_url = os.getenv("NODE_SCHEMA_ENDPOINT")
+    internal_secret = os.getenv("INTERNAL_SECRET")
+
+    payload = {
+        "schema": schema,
+        "file_summary": file_summary
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response_node = await client.post(
+                node_url,
+                json=payload,
+                headers={"x-internal-key": internal_secret},
+                timeout=60.0
+            )
+            print("✅ Schema sent to Node:", response_node.status_code)
+    except Exception as e:
+        print("❌ Failed to send schema to Node:", str(e))
 
     cleaned = convert_numpy_types(result)
-    # cleaned["prediction_result"] = prediction_result
+
     return JSONResponse(
         content=cleaned,
         media_type="application/json"

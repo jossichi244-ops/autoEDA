@@ -24,6 +24,7 @@ from pprint import pprint
 from sklearn.linear_model import LassoCV
 from scipy.stats import spearmanr, kruskal, mannwhitneyu, pearsonr
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
+from scipy.stats import pearsonr
 try:
     from lifelines import KaplanMeierFitter, CoxPHFitter
     LIFELINES_AVAILABLE = True
@@ -995,6 +996,78 @@ def analyze_category_impact(
         "effect_threshold": effect_threshold,
     }
 
+def generate_economies_of_scale_narrative(
+    df: pd.DataFrame,
+    driver_col: str,
+    outcome_col: str,
+    effect_threshold: float = 0.5,
+    min_corr: float = 0.3
+) -> str:
+    """
+    Tự động sinh narrative theo mẫu:
+    "Khi [biến khối lượng] tăng, [biến chi phí tổng] tăng theo... nhưng chi phí đơn vị giảm → economies of scale"
+    
+    Không cần biết tên cột cụ thể — chỉ cần truyền vào driver & outcome.
+    """
+    # --- Kiểm tra dữ liệu ---
+    if driver_col not in df.columns or outcome_col not in df.columns:
+        return f"Lỗi: Cột '{driver_col}' hoặc '{outcome_col}' không tồn tại trong dữ liệu."
+    
+    # Loại bỏ missing
+    tmp = df[[driver_col, outcome_col]].dropna()
+    if len(tmp) < 10:
+        return "Dữ liệu quá ít để phân tích."
+
+    # --- Tính correlation ---
+    try:
+        r, pval = pearsonr(tmp[driver_col], tmp[outcome_col])
+    except Exception:
+        return "Không thể tính tương quan giữa hai biến."
+
+    if abs(r) < min_corr:
+        return f"Không có mối liên hệ rõ ràng giữa {driver_col} và {outcome_col} (r = {r:.2f})."
+
+    # --- Tính chi phí đơn vị ---
+    unit_cost = tmp[outcome_col] / (tmp[driver_col] + 1e-9)
+    corr_unit = tmp[driver_col].corr(unit_cost)
+
+    # --- Tính % thay đổi trung bình khi driver tăng 10% ---
+    # Dùng linear regression đơn giản để ước lượng
+    from sklearn.linear_model import LinearRegression
+    X = tmp[[driver_col]]
+    y = tmp[outcome_col]
+    model = LinearRegression().fit(X, y)
+    mean_driver = tmp[driver_col].mean()
+    delta_10pct = mean_driver * 0.1
+    pred_change = model.predict([[mean_driver + delta_10pct]])[0] - model.predict([[mean_driver]])[0]
+    pct_change_outcome = (pred_change / tmp[outcome_col].mean()) * 100
+
+    # --- Diễn giải ---
+    direction = "tăng" if r > 0 else "giảm"
+    strength = "yếu" if abs(r) < 0.5 else "trung bình" if abs(r) < 0.7 else "mạnh"
+
+    narrative = f"Khi **biến đại diện cho khối lượng/số lượng đơn hàng** tăng, **biến phản ánh tổng chi phí vận chuyển** cũng có xu hướng {direction}, với mối quan hệ {strength} (hệ số tương quan Pearson ≈ {r:.2f}).\n\n"
+
+    if r > 0:
+        narrative += f"- Mô phỏng cho thấy: mỗi lần tăng **10% giá trị của biến khối lượng**, biến tổng chi phí **tăng trung bình ~{pct_change_outcome:.1f}%** — phù hợp với xu hướng tuyến tính dương.\n"
+
+        # Kiểm tra economies of scale
+        if corr_unit < -0.1:
+            narrative += "- Tuy nhiên, khi tính **tỷ lệ chi phí trên mỗi đơn vị** (tổng chi phí chia cho khối lượng), giá trị này **giảm nhẹ** — cho thấy **lợi thế kinh tế theo quy mô (economies of scale)** đang hiện hữu trong hệ thống logistics hiện tại.\n"
+            narrative += "- Điều này ngụ ý rằng: **vận chuyển khối lượng lớn trong một lần hiệu quả hơn về chi phí so với chia nhỏ thành nhiều chuyến**.\n\n"
+            narrative += "**Khuyến nghị hành động:**\n"
+            narrative += "→ Ưu tiên gom hàng (LTL consolidation) khi có thể — đặc biệt với các đơn hàng cùng tuyến, cùng thời điểm — để tận dụng hiệu ứng giảm chi phí đơn vị.\n"
+            narrative += "→ Tránh chia nhỏ các đơn hàng lớn thành nhiều đơn riêng lẻ — vì điều này phá vỡ lợi thế quy mô, làm tăng tổng chi phí vận hành dù khối lượng không đổi."
+        else:
+            narrative += "- Tuy nhiên, **chi phí trên mỗi đơn vị không giảm đáng kể** — cho thấy hệ thống chưa tận dụng được lợi thế theo quy mô.\n"
+            narrative += "**Khuyến nghị:** Xem xét tối ưu hóa gom hàng hoặc đàm phán giá theo khối lượng với nhà vận chuyển."
+
+    else:
+        narrative += "- Điều này có thể cho thấy **hiệu quả vận hành tăng** khi khối lượng tăng (vd: chia sẻ chi phí cố định).\n"
+        narrative += "**Khuyến nghị:** Phân tích sâu nguyên nhân để nhân rộng mô hình này."
+
+    return narrative.strip()
+
 def scenario_simulation(
     df: pd.DataFrame,
     change_dict: dict = None,
@@ -1140,15 +1213,6 @@ def scenario_simulation(
                                 f"so với trung bình {df[other].mean():.2f}, "
                                 f"tức khoảng {impact/df[other].mean()*100:.1f}%."
                             )
-                        # else:
-                        #     narratives.append(
-                        #         f"{col} và {other} chỉ hơi liên quan "
-                        #         f"(Giống như hai người quen xa xa). "
-                        #         f"Tác động dự kiến chỉ {impact:+.2f}, "
-                        #         f"so với trung bình {df[other].mean():.2f} là rất nhỏ "
-                        #         f"({impact/df[other].mean()*100:.2f}%)."
-                        #     )
-
 
                 # ML-based effect
                 pred_lin = coefs.get(col, 0) * delta
@@ -1167,14 +1231,14 @@ def scenario_simulation(
                     for d in cat_result.get("details", []):
                         key = f"Nếu {cat_col} là '{d['category_value']}'"
                         desc = (
-                            f"Thì giá trị của{ d['numeric_col']} thay đổi {d['effect']:+.2f} "
-                            f"Vì (Cohen's d={d['cohen_d']:.2f}, p={d['p']:.3f}, n={d['n']})"
+                            f"Thì giá trị của {d['numeric_col']} thay đổi {d['effect']:+.2f} "
+                            f"(Cohen's d = {d['cohen_d']:.2f}, p = {d['p']:.3f}, n = {d['n']})"
                         )
                         cat_impacts[key].append(desc)
                 for key, effects in cat_impacts.items():
                     narratives.append(f"Xét [{key}]: " + "; ".join(effects))
+        
         # === Hypothesis generation ===
-        # Corr-based
         for i, col1 in enumerate(numeric_cols):
             for col2 in numeric_cols[i+1:]:
                 if any(kw in col1.lower() for kw in ["cluster", "prediction"]):
@@ -1216,13 +1280,12 @@ def scenario_simulation(
                 "xác_suất": round(stable*100, 1)
             })
 
-        # === Datetime analysis (Y/Q/M/W) ===
+        # === Datetime analysis ===
         for dt_col in datetime_cols:
             ts_impacts_for_col = []
             try:
                 dt_info = stats["datetime"].get(dt_col, {})
                 dayfirst_flag = dt_info.get("dayfirst_used", True)
-
                 temp = df.copy()
                 temp[dt_col] = pd.to_datetime(temp[dt_col], errors="coerce", dayfirst=dayfirst_flag)
                 temp = temp.dropna(subset=[dt_col])
@@ -1238,28 +1301,18 @@ def scenario_simulation(
                 for freq, label in [("Y", "theo năm"), ("Q", "theo quý"), ("M", "theo tháng"), ("W", "theo tuần")]:
                     temp_grouped = temp.copy()
                     temp_grouped[label] = temp_grouped[dt_col].dt.to_period(freq).astype(str)
-
-                    # Lấy trung bình outcome theo chu kỳ
                     ts_summary = (
                         temp_grouped.groupby(label)[outcome_col]
                         .mean()
                         .reset_index()
                         .rename(columns={outcome_col: "mean_value"})
                     )
-
-                    # Lưu block JSON cho chart
                     time_series_impacts.append({
                         "datetime_col": dt_col,
                         "frequency": freq,
                         "label": label,
                         "series": ts_summary.to_dict(orient="records")
                     })
-                    
-                    print("=== Time Series Impact Block ===")
-                    print(time_series_impacts)
-                    print("===============================")
-
-                    # Narrative mô tả
                     dt_result = analyze_category_impact(
                         temp_grouped,
                         category_col=label,
@@ -1272,7 +1325,49 @@ def scenario_simulation(
             except Exception as e:
                 narratives.append(f"Lỗi khi phân tích datetime {dt_col}: {e}")
 
-        # Lưu kết quả cho outcome này
+        # === 🔍 TỰ ĐỘNG PHÁT HIỆN & CHÈN ECONOMIES OF SCALE NARRATIVE ===
+        driver_candidates = []
+        for col in numeric_features:
+            series = df[col].dropna()
+            if len(series) < 10:
+                continue
+            var_norm = series.var() / (series.max() - series.min() + 1e-9) if series.max() != series.min() else 0
+            skew_val = abs(series.skew())
+            if var_norm > 0.1 and skew_val < 2.0:
+                driver_candidates.append(col)
+
+        if driver_candidates and outcome_col in df.columns:
+            best_driver = None
+            best_corr = 0.3
+            for col in driver_candidates:
+                try:
+                    r, _ = pearsonr(df[col].dropna(), df[outcome_col].dropna())
+                    if r > best_corr:
+                        best_corr = r
+                        best_driver = col
+                except Exception:
+                    continue
+
+            if best_driver:
+                try:
+                    econ_narrative = generate_economies_of_scale_narrative(
+                        df=df,
+                        driver_col=best_driver,
+                        outcome_col=outcome_col,
+                        effect_threshold=0.5,
+                        min_corr=0.3
+                    )
+                    if isinstance(econ_narrative, str) and not (
+                        econ_narrative.startswith("Lỗi") or "Không có mối liên hệ" in econ_narrative
+                    ):
+                        narratives.append("\n" + "="*60)
+                        narratives.append("🔍 PHÂN TÍCH LỢI THẾ KINH TẾ THEO QUY MÔ (ECONOMIES OF SCALE)")
+                        narratives.append("="*60)
+                        narratives.append(econ_narrative)
+                except Exception as e:
+                    narratives.append(f"[Lỗi khi tạo narrative economies of scale: {str(e)}]")
+
+        # === Lưu kết quả ===
         top_impacts = {
             col: f"{impacts[0][1]:+.2f}" if impacts else "0.00"
             for col, impacts in impacted_summary.items()

@@ -4,7 +4,7 @@ import math
 import re
 from scipy.stats import skew, kurtosis
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from scipy.stats import chi2_contingency, f_oneway
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.metrics import silhouette_score
@@ -15,15 +15,19 @@ import logging
 from typing import Optional
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 import warnings
-warnings.filterwarnings("ignore")
 import pandas as pd
 import numpy as np
+from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+from dateutil import parser
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+warnings.filterwarnings("ignore")
 
 def downcast_dtypes(df):
-    for col in df.select_dtypes(include = ['int']).column:
+    for col in df.select_dtypes(include = ['int']).columns:
+
         df[col] = pd.to_numeric(df[col], downcast = 'integer')
     for col in df.select_dtypes(include =['float']).column:
         df[col] = pd.to_numeric(df[col], downcast='float')
@@ -58,102 +62,279 @@ def infer_date_format(series: pd.Series, top_n: int = 100):
         return best_fmt
     return None
 
-def infer_schema_from_df(df: pd.DataFrame, max_unique_for_enum: int = 20) -> dict:
+# def standardize_dataframe_types(df: pd.DataFrame,
+#                                 numeric_threshold: float = 0.8,
+#                                 datetime_threshold: float = 0.8):
+#     """
+#     Enterprise-grade automatic dtype inference & coercion.
+#     Returns:
+#         cleaned_df
+#         detected_schema
+#     """
+
+#     df_clean = df.copy()
+#     detected_schema = {}
+
+#     for col in df_clean.columns:
+#         original = df_clean[col]
+#         series = normalize_nulls(original)
+
+#         non_null = series.dropna()
+#         total = len(series)
+
+#         # ---------- NUMERIC DETECTION ----------
+#         numeric_try = pd.to_numeric(non_null, errors="coerce")
+#         numeric_ratio = numeric_try.notna().mean() if len(non_null) > 0 else 0
+
+#         # ---------- DATETIME DETECTION ----------
+#         dt_try1 = pd.to_datetime(non_null, errors="coerce", dayfirst=True)
+#         dt_try2 = pd.to_datetime(non_null, errors="coerce", dayfirst=False)
+
+#         dt_ratio = max(dt_try1.notna().mean(), dt_try2.notna().mean()) if len(non_null) > 0 else 0
+
+#         # ---------- BOOLEAN DETECTION ----------
+#         bool_values = non_null.astype(str).str.lower().isin(["true","false","0","1"])
+#         bool_ratio = bool_values.mean() if len(non_null) > 0 else 0
+
+#         # ---------- DECISION TREE ----------
+#         if numeric_ratio >= numeric_threshold:
+#             df_clean[col] = pd.to_numeric(series, errors="coerce")
+#             detected_schema[col] = "numeric"
+
+#         elif dt_ratio >= datetime_threshold:
+#             parsed = dt_try1 if dt_try1.notna().mean() >= dt_try2.notna().mean() else dt_try2
+#             df_clean[col] = parsed
+#             detected_schema[col] = "datetime"
+
+#         elif bool_ratio >= 0.95:
+#             df_clean[col] = series.astype(str).str.lower().map(
+#                 {"true": True, "1": True, "false": False, "0": False}
+#             )
+#             detected_schema[col] = "boolean"
+
+#         else:
+#             # categorical vs text
+#             unique_count = series.nunique()
+#             if unique_count < 0.1 * total:
+#                 df_clean[col] = series.astype("category")
+#                 detected_schema[col] = "categorical"
+#             else:
+#                 df_clean[col] = series.astype(str)
+#                 detected_schema[col] = "string"
+
+#     return df_clean, detected_schema
+
+def robust_datetime_parse(series: pd.Series):
+    parsed_dates = []
+    ambiguous_count = 0
+    success_count = 0
+
+    for val in series:
+
+        if pd.isna(val):
+            parsed_dates.append(pd.NaT)
+            continue
+
+        val = str(val).strip()
+        if val == "":
+            parsed_dates.append(pd.NaT)
+            continue
+
+        # 🚫 Guard: nếu numeric thuần → không parse datetime
+        if re.fullmatch(r"^-?\d+(\.\d+)?$", val):
+            parsed_dates.append(pd.NaT)
+            continue
+
+        try:
+            dt_dayfirst = parser.parse(val, dayfirst=True, fuzzy=False)
+            dt_monthfirst = parser.parse(val, dayfirst=False, fuzzy=False)
+
+            if dt_dayfirst != dt_monthfirst:
+                ambiguous_count += 1
+
+            parsed_dates.append(dt_dayfirst)
+            success_count += 1
+
+        except Exception:
+            parsed_dates.append(pd.NaT)
+
+    parsed_series = pd.Series(parsed_dates)
+
+    return parsed_series, {
+        "success_ratio": success_count / max(1, len(series)),
+        "ambiguous_ratio": ambiguous_count / max(1, len(series))
+    }
+
+def standardize_dataframe_types(
+    df: pd.DataFrame,
+    numeric_threshold: float = 0.9,
+    datetime_threshold: float = 0.9,
+):
+
+    df = df.copy()
+
+    # ==============================
+    # 0️⃣ GLOBAL NULL NORMALIZATION
+    # ==============================
+    df = df.applymap(
+        lambda x: np.nan
+        if isinstance(x, str) and x.strip() in ["", "null", "NULL", "n/a", "N/A"]
+        else x
+    )
+
+    schema = {}
+    datetime_reports = {}
+
+    for col in df.columns:
+
+        series = df[col]
+
+        # luôn làm việc trên bản đã dropna
+        non_null = series.dropna()
+
+        # ================= NUMERIC =================
+        numeric_try = pd.to_numeric(non_null, errors="coerce")
+        numeric_ratio = (
+            numeric_try.notna().mean() if len(non_null) > 0 else 0
+        )
+
+        if numeric_ratio >= numeric_threshold:
+            df[col] = pd.to_numeric(series, errors="coerce")
+            schema[col] = "numeric"
+            continue
+
+        # ================= DATETIME =================
+        parsed_dt, dt_report = robust_datetime_parse(non_null)
+        dt_ratio = (
+            parsed_dt.notna().mean() if len(non_null) > 0 else 0
+        )
+
+        if dt_ratio >= datetime_threshold:
+            df[col] = pd.to_datetime(series, errors="coerce")
+            schema[col] = "datetime"
+            datetime_reports[col] = dt_report
+            continue
+
+        # ================= BOOLEAN =================
+        bool_ratio = (
+            non_null.astype(str)
+            .str.lower()
+            .isin(["true", "false", "0", "1"])
+            .mean()
+            if len(non_null) > 0
+            else 0
+        )
+
+        if bool_ratio > 0.95:
+            df[col] = (
+                series.astype(str)
+                .str.lower()
+                .map({"true": True, "1": True, "false": False, "0": False})
+            )
+            schema[col] = "boolean"
+            continue
+
+        # ================= CATEGORICAL / STRING =================
+        unique_ratio = (
+            non_null.nunique() / max(1, len(non_null))
+        )
+
+        if unique_ratio < 0.1:
+            df[col] = series.astype("category")
+            schema[col] = "categorical"
+        else:
+            df[col] = series.astype("string")
+            schema[col] = "string"
+
+    return df, {
+        "schema": schema,
+        "datetime_quality": datetime_reports,
+    }
+
+def infer_schema_from_df(
+    df: pd.DataFrame,
+    type_info: dict | None = None,
+    config: dict | None = None
+) -> dict:
+
+    type_info = type_info or {}
+    schema_map = type_info.get("schema", {})
+    datetime_quality = type_info.get("datetime_quality", {})
+
     props = {}
 
     for col in df.columns:
-        series = df[col].dropna()
-        total = len(series)
-        dtype = "string"
-        detected_format = None
+        series = df[col]
+        dtype = schema_map.get(col, "string")
 
-        # === 1. Kiểm tra dtype gốc ===
-        if pd.api.types.is_integer_dtype(series):
-            dtype = "integer"
-        elif pd.api.types.is_float_dtype(series):
-            dtype = "number"
-        elif pd.api.types.is_bool_dtype(series):
-            dtype = "boolean"
-        elif pd.api.types.is_datetime64_any_dtype(series):
-            dtype = "datetime"
-        else:
-            # === 2. Thử parse datetime (2 hướng dayfirst) ===
-            parsed_success = False
-            sample_str = series.astype(str)
-            for dayfirst in [False, True]:
-                try:
-                    dt_parsed = pd.to_datetime(sample_str, errors="coerce", dayfirst=dayfirst)
-                    if dt_parsed.notnull().mean() > 0.5:
-                        dtype = "datetime"
-                        parsed_success = True
-                        detected_format = infer_date_format(sample_str)
-                        break
-                except Exception:
-                    continue
+        unique_count = series.nunique(dropna=True)
 
-            if not parsed_success:
-                # === 3. Kiểm tra numeric dạng text ===
-                if sample_str.str.match(r"^-?\d+$").all():
-                    dtype = "integer"
-                elif sample_str.str.match(r"^-?\d+(\.\d+)?$").all():
-                    dtype = "number"
-                # === 4. Kiểm tra dạng multi-value hoặc enum ===
-                elif sample_str.str.contains(r"[;,|]").any():
-                    dtype = "multi-select"
-                elif series.nunique() <= max_unique_for_enum:
-                    dtype = "categorical"
-                else:
-                    dtype = "string"
-
-        # === 5. Tạo schema property ===
-        unique_count = series.nunique()
-        prop = {"type": dtype if dtype not in ["datetime", "multi-select", "categorical"] else "string"}
-
-        if dtype == "datetime":
-            prop["format"] = "date-time"
-            if detected_format:
-                prop["pattern"] = detected_format
-            # Thêm metadata ví dụ:
-            dt_col = pd.to_datetime(series, errors="coerce")
-            prop["examples"] = [str(x) for x in dt_col.dropna().head(3).tolist()]
-            prop["min"] = str(dt_col.min()) if not pd.isna(dt_col.min()) else None
-            prop["max"] = str(dt_col.max()) if not pd.isna(dt_col.max()) else None
-
-        elif dtype == "multi-select":
-            prop["description"] = "Multiple values separated by comma, semicolon, or pipe"
-            prop["examples"] = series.head(3).tolist()
-
-        elif dtype == "categorical":
-            prop["enum"] = sorted(series.unique().tolist())
-            prop["examples"] = series.head(3).tolist()
-
-        elif dtype == "number" or dtype == "integer":
+        # === NUMERIC ===
+        if dtype == "numeric":
             numeric_col = pd.to_numeric(series, errors="coerce")
-            prop["minimum"] = float(numeric_col.min()) if not pd.isna(numeric_col.min()) else None
-            prop["maximum"] = float(numeric_col.max()) if not pd.isna(numeric_col.max()) else None
-            prop["examples"] = numeric_col.dropna().head(3).tolist()
+
+            prop = {
+                "type": "number",
+                "minimum": float(numeric_col.min()) if not pd.isna(numeric_col.min()) else None,
+                "maximum": float(numeric_col.max()) if not pd.isna(numeric_col.max()) else None,
+                "examples": numeric_col.dropna().head(3).tolist()
+            }
+
+        # === DATETIME ===
+        elif dtype == "datetime":
+            dt_col = pd.to_datetime(series, errors="coerce")
+
+            prop = {
+                "type": "string",
+                "format": "date-time",
+                "examples": [str(x) for x in dt_col.dropna().head(3)],
+                "min": str(dt_col.min()) if not pd.isna(dt_col.min()) else None,
+                "max": str(dt_col.max()) if not pd.isna(dt_col.max()) else None,
+                "datetime_quality": type_info["datetime_quality"].get(col)
+            }
+
+        # === CATEGORICAL ===
+        elif dtype == "categorical":
+            enum_values = (
+                series
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+
+            prop = {
+                "type": "string",
+                "enum": sorted(enum_values),
+                "examples": series.dropna().head(3).astype(str).tolist()
+            }
+
+        # === BOOLEAN ===
+        elif dtype == "boolean":
+            prop = {
+                "type": "boolean",
+                "examples": series.dropna().head(3).tolist()
+            }
 
         else:
-            prop["examples"] = series.head(3).tolist()
-            avg_len = series.astype(str).map(len).mean() if len(series) > 0 else 0
+            prop = {
+                "type": "string",
+                "examples": series.dropna().head(3).tolist(),
+                "avg_length": series.astype(str).map(len).mean()
+            }
 
-            prop["avg_length"] = avg_len
-
-        # === 6. Metadata chung ===
         prop["non_null"] = int(series.notnull().sum())
-        prop["nulls"] = int(df[col].isnull().sum())
+        prop["nulls"] = int(series.isnull().sum())
         prop["unique_count"] = int(unique_count)
 
         props[col] = prop
 
-    schema = {
+    return {
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "SmartGeneratedSchema",
+        "title": "EnterpriseGeneratedSchema",
         "type": "object",
         "properties": props
     }
-
-    return schema
 
 def shannon_entropy(values):
     freq = values.value_counts(normalize=True)
@@ -248,6 +429,7 @@ def analyze_column(col: pd.Series) -> dict:
         "example": convert_numpy_types(series_dropped.head(3).tolist()),
         "stats": stats
     }
+
 def convert_numpy_types(obj):
     if isinstance(obj, dict):
         return {str(k): convert_numpy_types(v) for k, v in obj.items()}
@@ -278,6 +460,168 @@ def convert_numpy_types(obj):
     else:
         return obj
 
+def numeric_advanced_stats(series: pd.Series):
+    series = pd.to_numeric(series, errors="coerce").dropna()
+    if len(series) == 0:
+        return None
+
+    mean = series.mean()
+    std = series.std()
+
+    z_scores = (series - mean) / (std if std != 0 else 1)
+
+    p1 = float(series.quantile(0.01))
+    p99 = float(series.quantile(0.99))
+
+    cv = float(std / mean) if mean != 0 else None
+
+    skew = float(series.skew())
+    if abs(skew) < 0.5:
+        shape = "approximately_normal"
+    elif skew > 1:
+        shape = "right_skewed"
+    elif skew < -1:
+        shape = "left_skewed"
+    else:
+        shape = "moderately_skewed"
+
+    return {
+        "p1": p1,
+        "p99": p99,
+        "coefficient_of_variation": cv,
+        "z_score_outliers_2": int((abs(z_scores) > 2).sum()),
+        "z_score_outliers_3": int((abs(z_scores) > 3).sum()),
+        "max_abs_z_score": float(abs(z_scores).max()),
+        "distribution_shape": shape
+    }
+
+def categorical_advanced_stats(series: pd.Series):
+    series = series.dropna()
+    if len(series) == 0:
+        return None
+
+    probs = series.value_counts(normalize=True)
+    gini = float(1 - np.sum(probs ** 2))
+
+    rare_ratio = float((probs < 0.01).sum() / len(probs))
+
+    return {
+        "gini_impurity": gini,
+        "rare_category_ratio": rare_ratio
+    }
+
+def datetime_advanced_stats(series: pd.Series):
+    dt = pd.to_datetime(series, errors="coerce").dropna()
+    if len(dt) == 0:
+        return None
+
+    dt_sorted = dt.sort_values()
+    gaps = dt_sorted.diff().dropna()
+
+    weekday_dist = dt.dt.weekday.value_counts(normalize=True).to_dict()
+    month_dist = dt.dt.month.value_counts(normalize=True).to_dict()
+
+    return {
+        "weekday_distribution": weekday_dist,
+        "month_distribution": month_dist,
+        "max_gap_days": float(gaps.max().days) if not gaps.empty else None,
+        "median_gap_days": float(gaps.median().days) if not gaps.empty else None,
+        "date_span_days": int((dt.max() - dt.min()).days)
+    }
+
+def benford_test(series: pd.Series):
+    series = pd.to_numeric(series, errors="coerce").dropna()
+    series = series[series > 0]
+    if len(series) == 0:
+        return None
+
+    first_digits = series.astype(str).str[0]
+    actual = first_digits.value_counts(normalize=True).to_dict()
+
+    benford_dist = {str(d): math.log10(1 + 1/d) for d in range(1,10)}
+
+    deviation = sum(abs(actual.get(str(d), 0) - benford_dist[str(d)]) for d in range(1,10))
+
+    return {
+        "benford_deviation": float(deviation),
+        "benford_flag": deviation > 0.15
+    }
+
+def detect_regex_pattern(series):
+    patterns = {
+        "email": r"^[\w\.-]+@[\w\.-]+\.\w+$",
+        "phone": r"^\+?\d{8,15}$",
+        "uuid": r"^[a-f0-9\-]{36}$",
+        "zipcode": r"^\d{4,6}$"
+    }
+
+    results = {}
+    series = series.dropna().astype(str)
+
+    for name, pattern in patterns.items():
+        match_ratio = series.str.match(pattern).mean()
+        if match_ratio > 0.8:
+            results[name] = float(match_ratio)
+
+    return results
+
+def detect_multicollinearity(df):
+    numeric_df = df.select_dtypes(include=np.number)
+    if numeric_df.shape[1] < 2:
+        return None
+
+    corr_matrix = numeric_df.corr().abs()
+    high_corr_pairs = []
+
+    for i in range(len(corr_matrix.columns)):
+        for j in range(i+1, len(corr_matrix.columns)):
+            if corr_matrix.iloc[i, j] > 0.9:
+                high_corr_pairs.append({
+                    "col1": corr_matrix.columns[i],
+                    "col2": corr_matrix.columns[j],
+                    "correlation": float(corr_matrix.iloc[i, j])
+                })
+
+    return high_corr_pairs
+
+def detect_multicollinearity(df):
+    numeric_df = df.select_dtypes(include=np.number)
+    if numeric_df.shape[1] < 2:
+        return None
+
+    corr_matrix = numeric_df.corr().abs()
+    high_corr_pairs = []
+
+    for i in range(len(corr_matrix.columns)):
+        for j in range(i+1, len(corr_matrix.columns)):
+            if corr_matrix.iloc[i, j] > 0.9:
+                high_corr_pairs.append({
+                    "col1": corr_matrix.columns[i],
+                    "col2": corr_matrix.columns[j],
+                    "correlation": float(corr_matrix.iloc[i, j])
+                })
+
+    return high_corr_pairs
+
+def compute_mutual_information(df, target):
+    if target not in df.columns:
+        return None
+
+    X = df.drop(columns=[target])
+    y = df[target]
+
+    numeric_X = X.select_dtypes(include=np.number).fillna(0)
+
+    if len(numeric_X.columns) == 0:
+        return None
+
+    if pd.api.types.is_numeric_dtype(y):
+        mi = mutual_info_regression(numeric_X, y.fillna(0))
+    else:
+        y_encoded = LabelEncoder().fit_transform(y.astype(str))
+        mi = mutual_info_classif(numeric_X, y_encoded)
+
+    return dict(zip(numeric_X.columns, mi.tolist()))
 
 def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str] = None) -> dict:
     total_rows, total_cols = df.shape
@@ -287,7 +631,7 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str
     # dtypes
     dtypes = {col: str(dtype) for col, dtype in df.dtypes.items()}
 
-    # memory usage
+    # ================= MEMORY =================
     try:
         mem_series = df.memory_usage(deep=True)
         memory_per_column = {col: int(mem_series[col]) for col in mem_series.index}
@@ -296,9 +640,10 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str
         memory_per_column = {}
         memory_total = None
 
-    # missing values
+    # ================= MISSING =================
     null_counts = df.isnull().sum()
     null_percent = (null_counts / max(1, total_rows)).round(4)
+
     missing_summary = {
         "total_cells": int(total_rows * total_cols),
         "total_missing": int(null_counts.sum()),
@@ -309,7 +654,7 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str
         "columns_many_missing": (null_percent[null_percent > 0.5]).sort_values(ascending=False).to_dict()
     }
 
-    # duplicates
+    # ================= DUPLICATES =================
     try:
         duplicate_rows_count = int(df.duplicated().sum())
         duplicate_rows_sample = df[df.duplicated(keep=False)].head(5).to_dict(orient="records")
@@ -406,6 +751,13 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str
             probs = [c / sum(counts) for c in counts]
             entropy = float(round(-sum(p * math.log2(p) for p in probs if p > 0), 4))
 
+        # -------- ADVANCED BLOCK --------
+        advanced_numeric = numeric_advanced_stats(col_series) if num_parsed_pct > 0.5 else None
+        benford = benford_test(col_series) if num_parsed_pct > 0.5 else None
+        advanced_cat = categorical_advanced_stats(col_series) if 1 < unique_count < 100 else None
+        advanced_dt = datetime_advanced_stats(col_series) if dt_parsed_pct > 0.5 else None
+        regex_patterns = detect_regex_pattern(col_series)
+
         # correlation with target
         correlation_with_target = None
         if target_series is not None and col != target:
@@ -481,7 +833,12 @@ def inspect_dataset(df: pd.DataFrame, max_sample: int = 10, target: Optional[str
             "entropy": entropy,
             "correlation_with_target": correlation_with_target,
             "sample_values": col_series.dropna().head(5).tolist(),
-            "suggested_actions": suggestions
+            "suggested_actions": suggestions,
+            "advanced_numeric": advanced_numeric,
+            "advanced_categorical": advanced_cat,
+            "advanced_datetime": advanced_dt,
+            "regex_detected": regex_patterns,
+            "benford_analysis": benford,
         }
 
     return {
