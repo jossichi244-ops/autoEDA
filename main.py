@@ -3,7 +3,7 @@ from io import BytesIO
 import json
 from fastapi import FastAPI,File, Form, HTTPException, UploadFile, logger
 from fastapi.responses import JSONResponse
-from flask import app
+# from flask import app
 import httpx
 import numpy as np
 import pandas as pd
