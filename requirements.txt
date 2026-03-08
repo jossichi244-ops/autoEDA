@@ -7,14 +7,31 @@ pandas
 numpy
 openpyxl
 xlrd
+python-dateutil
 
 scipy
 scikit-learn
 statsmodels
+patsy
+
+xgboost
+lightgbm
+catboost
+
+optuna
+joblib
+
+prophet
+pmdarima  
+tslearn   
+bitsandbytes
 
 seaborn
 matplotlib
 plotly
+
+torch
+keras-tcn
 
 pydantic
 orjson

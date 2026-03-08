@@ -41,15 +41,13 @@ from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from prophet import Prophet 
+from tcn import TCN
+from modules.eda import infer_schema_from_df 
 # from tbats import TBATS, BATS, Theta  
 
 # import tensorflow as tf
 # from tensorflow.keras.models import Sequential
 # from tensorflow.keras.layers import Dense, SimpleRNN, LSTM, GRU, Input, Conv1D, GlobalMaxPooling1D, Embedding
-
-from tcn import TCN
-
-from modules.eda import infer_schema_from_df 
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
