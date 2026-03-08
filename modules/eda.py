@@ -13,7 +13,7 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from sklearn.ensemble import IsolationForest, RandomForestClassifier, RandomForestRegressor
 import logging
 from typing import Optional
-from transformers import AutoTokenizer, AutoModelForCausalLM
+# from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import warnings
 import pandas as pd
